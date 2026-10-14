@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react'
-import type { HostTarget, JumpProfile, HostFolder, ClientContext } from '../shared/types'
+import type { HostTarget, JumpProfile, HostFolder, ClientContext, SavedCredential } from '../shared/types'
+import { CREDENTIAL_LABELS } from '../shared/credentialLabels'
 import { rpc } from './api'
 import { folderRows } from './folders'
 
@@ -25,15 +26,18 @@ export function Modal({ title, children, onClose }: { title: string; children: R
   </div>
 }
 function Field({ title, children }: { title: string; children: React.ReactNode }) { return <label className="zt-field"><span>{title}</span>{children}</label> }
-export function HostEditor({ ctx, host, folders, revision, onClose, onSaved }: {
-  ctx: ClientContext; host?: HostTarget; folders: HostFolder[]; revision?: number; onClose: () => void; onSaved: () => void
+export function HostEditor({ ctx, host, folders, credentials = [], defaultCredentialId, revision, onClose, onSaved }: {
+  ctx: ClientContext; host?: HostTarget; folders: HostFolder[]; credentials?: SavedCredential[]; defaultCredentialId?: string; revision?: number; onClose: () => void; onSaved: () => void
 }) {
   const [form, setForm] = useState({ label: host?.label ?? '', host: host?.host ?? '', port: String(host?.port ?? 22), username: host?.username ?? '', authType: host?.authType ?? 'key-file', privateKeyPath: host?.privateKeyPath ?? '', folderId: host?.folderId ?? '' })
   const [secret, setSecret] = useState(''), [phrase, setPhrase] = useState(''), [clearPhrase, setClearPhrase] = useState(false), [error, setError] = useState(''), [busy, setBusy] = useState(false)
+  const [authChoice, setAuthChoice] = useState(host?.credentialId || (!host && credentials.length) ? 'saved' : host?.authType ?? 'key-file')
+  const [credentialId, setCredentialId] = useState(host?.credentialId || defaultCredentialId || credentials[0]?.id || '')
+  const retainsSecret = host && !host.credentialId && host.authType === authChoice
   const patch = (key: string, value: string) => setForm((previous) => ({ ...previous, [key]: value }))
   return <Modal title={host ? '编辑远程主机' : '添加远程主机'} onClose={onClose}><form onSubmit={(e) => {
     e.preventDefault(); setBusy(true); setError('')
-    void rpc(ctx, 'host/save', { host: { ...host, ...form, folderId: form.folderId || undefined, port: Number(form.port), kind: 'ssh' }, secret, passphrase: phrase, clearPassphrase: clearPhrase, revision })
+    void rpc(ctx, 'host/save', { host: { ...host, ...form, credentialId: authChoice === 'saved' ? credentialId : undefined, folderId: form.folderId || undefined, port: Number(form.port), kind: 'ssh' }, secret: authChoice === 'saved' ? '' : secret, passphrase: authChoice === 'saved' ? '' : phrase, clearPassphrase: clearPhrase, revision })
       .then(() => { setSecret(''); setPhrase(''); onSaved(); onClose() }).catch((e) => setError(e.message)).finally(() => setBusy(false))
   }}>
     <Field title="名称"><input required value={form.label} onChange={(e) => patch('label', e.target.value)} /></Field>
@@ -41,13 +45,15 @@ export function HostEditor({ ctx, host, folders, revision, onClose, onSaved }: {
       <Field title="端口"><input type="number" required min="1" max="65535" value={form.port} onChange={(e) => patch('port', e.target.value)} /></Field></div>
     <Field title="登录账号"><input required value={form.username} onChange={(e) => patch('username', e.target.value)} /></Field>
     <Field title="文件夹"><select value={form.folderId} onChange={(e) => patch('folderId', e.target.value)}><option value="">根目录</option>{folderRows(folders).map((f) => <option key={f.id} value={f.id}>{'　'.repeat(Math.min(8, f.depth))}{f.label}</option>)}</select></Field>
-    <Field title="认证方式"><select value={form.authType} onChange={(e) => patch('authType', e.target.value)}><option value="password">密码</option><option value="key">私钥内容</option><option value="key-file">私钥文件</option></select></Field>
-    {['password', 'key'].includes(form.authType) && <Field title={form.authType === 'key' ? '私钥内容' : '密码'}>{form.authType === 'key'
-      ? <textarea rows={5} value={secret} placeholder={host ? '留空保留现有私钥' : '粘贴私钥内容'} onChange={(e) => setSecret(e.target.value)} spellCheck={false} />
-      : <input type="password" value={secret} autoComplete="new-password" placeholder={host ? '留空保留现有密码' : '输入密码'} onChange={(e) => setSecret(e.target.value)} />}</Field>}
-    {form.authType === 'key-file' && <><Field title="私钥文件路径"><input value={form.privateKeyPath} placeholder="留空使用默认 SSH 私钥文件" onChange={(e) => patch('privateKeyPath', e.target.value)} /></Field>
+    <Field title="认证方式"><select value={authChoice} onChange={(e) => { setAuthChoice(e.target.value); if (e.target.value !== 'saved') patch('authType', e.target.value); setSecret(''); setPhrase(''); setClearPhrase(false) }}><option value="saved">选择已保存凭证</option><option value="password">密码</option><option value="key">私钥内容</option><option value="key-file">私钥文件</option></select></Field>
+    {authChoice === 'saved' && <><Field title="登录凭证"><select required value={credentialId} onChange={(e) => setCredentialId(e.target.value)}><option value="">请选择凭证</option>{credentials.map((c) => <option key={c.id} value={c.id}>{c.label} · {CREDENTIAL_LABELS[c.authType]}</option>)}</select></Field>
+      <p className="zt-hint">凭证在「设置 → zTerm → 管理凭证」中保存，此处无需再填内容或路径。</p></>}
+    {['password', 'key'].includes(authChoice) && <Field title={form.authType === 'key' ? '私钥内容' : '密码'}>{form.authType === 'key'
+      ? <textarea rows={5} value={secret} placeholder={retainsSecret ? '留空保留现有私钥' : '粘贴私钥内容'} onChange={(e) => setSecret(e.target.value)} spellCheck={false} required={!retainsSecret} />
+      : <input type="password" value={secret} autoComplete="new-password" placeholder={retainsSecret ? '留空保留现有密码' : '输入密码'} onChange={(e) => setSecret(e.target.value)} required={!retainsSecret} />}</Field>}
+    {authChoice === 'key-file' && <><Field title="私钥文件路径"><input value={form.privateKeyPath} placeholder="留空使用默认 SSH 私钥文件" onChange={(e) => patch('privateKeyPath', e.target.value)} /></Field>
       <p className="zt-hint">填写 DSH 宿主上的绝对路径或 ~/ 路径。DSH 部署在远端时，填写远端的文件路径。</p></>}
-    {['key', 'key-file'].includes(form.authType) && <><Field title="私钥口令（可选）"><input type="password" disabled={clearPhrase} value={phrase} placeholder="留空保留现有口令" onChange={(e) => setPhrase(e.target.value)} /></Field>{host?.passphraseRef && <label className="zt-check"><input type="checkbox" checked={clearPhrase} onChange={(e) => setClearPhrase(e.target.checked)} />移除此主机的私钥口令引用</label>}</>}
+    {['key', 'key-file'].includes(authChoice) && <><Field title="私钥口令（可选）"><input type="password" disabled={clearPhrase} value={phrase} placeholder="留空保留现有口令" onChange={(e) => setPhrase(e.target.value)} /></Field>{host?.passphraseRef && <label className="zt-check"><input type="checkbox" checked={clearPhrase} onChange={(e) => setClearPhrase(e.target.checked)} />移除此主机的私钥口令引用</label>}</>}
     <p className="zt-hint">密码、私钥内容和口令保存在 DSH 凭据库；私钥文件由宿主读取。所有新连接默认读模式。</p>{error && <p className="zt-error" role="alert">{error}</p>}
     <footer><button type="button" onClick={onClose}>取消</button><button className="zt-primary" disabled={busy}>{busy ? '保存中…' : '保存主机'}</button></footer>
   </form></Modal>

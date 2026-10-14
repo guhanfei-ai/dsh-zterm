@@ -19,6 +19,7 @@ export function Workbench({ ctx, sessionId, visible = true, onClose }: { ctx: Cl
   const [showRecords, setShowRecords] = useState(false), [listHidden, setListHidden] = useState(false), [listWidth, setListWidth] = useState(() => savedNumber('dsh-zterm.list-width', 240, 180, 440))
   const [actionBusy, setActionBusy] = useState(false), [saved, setSaved] = useState(false), [confirm, setConfirm] = useState<{ text: string; act: () => void }>()
   const alive = useRef(true), visibleRef = useRef(visible), cursor = useRef(-1), pollRefresh = useRef<() => Promise<void>>(async () => {}), activeRef = useRef(active), catalogRequest = useRef(0), accountRequest = useRef(0)
+  const tabsRef = useRef<HTMLElement>(null), activeTabRef = useRef<HTMLDivElement>(null)
   const startDrag = useDrag()
   visibleRef.current = visible; activeRef.current = active
   const fail = useCallback((message: string) => setError(message), [])
@@ -54,6 +55,12 @@ export function Workbench({ ctx, sessionId, visible = true, onClose }: { ctx: Cl
     finally { if (alive.current) setActionBusy(false) }
   }, [ctx, sessionId, fail])
   const connect = async (target: unknown) => { const view = await action('connect', { target }); if (view?.id) setActive(view.id) }
+  useEffect(() => {
+    if (!visible || !tabsRef.current) return
+    const reveal = () => activeTabRef.current?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+    reveal(); const observer = new ResizeObserver(reveal); observer.observe(tabsRef.current)
+    return () => observer.disconnect()
+  }, [active, visible, workspace.terminals.length])
   const current = workspace.terminals.find((t) => t.id === active), bound = workspace.binding, currentBound = current && bound?.terminalId === current.id && bound.generation === current.generation
   const trustTerminal = workspace.terminals.find((t) => t.trust), trustParameters = trustTerminal ? { terminalId: trustTerminal.id, generation: trustTerminal.generation } : {}
   const targetText = (terminal: TerminalView) => terminal.target.source === 'local' ? terminal.target.label : `${terminal.target.username ?? ''}@${terminal.target.host ?? terminal.target.label}${terminal.target.port ? `:${terminal.target.port}` : ''}`
@@ -83,11 +90,11 @@ export function Workbench({ ctx, sessionId, visible = true, onClose }: { ctx: Cl
     {error && <div className="zt-error-banner" role="alert"><span>{error}</span><button aria-label="关闭错误提示" onClick={() => setError('')}>×</button></div>}
     <div className="zt-workbench-body">
       <main className="zt-terminal-area">
-        <div className="zt-terminal-topbar"><nav className="zt-terminal-tabs" aria-label="终端标签">{workspace.terminals.map((terminal) => <div key={terminal.id} className={`zt-tab ${terminal.id === active ? 'active' : ''}`}>
+        <div className="zt-terminal-topbar"><nav ref={tabsRef} className="zt-terminal-tabs" aria-label="终端标签">{workspace.terminals.map((terminal) => <div key={terminal.id} ref={terminal.id === active ? activeTabRef : undefined} className={`zt-tab ${terminal.id === active ? 'active' : ''}`}>
           <button onClick={() => setActive(terminal.id)} title={targetText(terminal)}><i className={`zt-state-dot ${terminal.state}`} />{terminal.target.label}</button>
           <button aria-label={`关闭终端 ${terminal.target.label}`} onClick={() => setConfirm({ text: `关闭「${terminal.target.label}」的终端连接？`, act: () => { void action('close', { terminalId: terminal.id }); setConfirm(undefined) } })}>×</button></div>)}
-          {workspace.capabilities.local && <button className="zt-new-tab" title="打开 DSH 宿主的本地终端" onClick={() => void connect({ kind: 'local' })}>＋ 本地</button>}</nav>
-          <div className="zt-terminal-controls"><button title="操作记录" onClick={() => setShowRecords(!showRecords)}>记录</button><button title="显示或收起主机列表" onClick={() => setListHidden(!listHidden)}>{listHidden ? '主机列表' : '收起列表'}</button>{onClose && <button aria-label={`收起 ${PRODUCT_NAME}`} onClick={onClose}>×</button>}</div></div>
+          </nav>
+          <div className="zt-terminal-controls"><button disabled={!workspace.capabilities.local || actionBusy} title={workspace.capabilities.local ? '每次点击新开一个终端，运行在 DSH 所在的机器上' : `请在 ${PRODUCT_NAME} 设置中启用本地终端并保存`} onClick={() => void connect({ kind: 'local' })}>打开本机终端</button><button title="操作记录" onClick={() => setShowRecords(!showRecords)}>记录</button><button title="显示或收起主机列表" onClick={() => setListHidden(!listHidden)}>{listHidden ? '主机列表' : '收起列表'}</button>{onClose && <button aria-label={`收起 ${PRODUCT_NAME}`} onClick={onClose}>×</button>}</div></div>
         {current ? <><div className="zt-terminal-toolbar"><div className="zt-target" title={targetText(current)}>{targetText(current)}<span>{status[current.state]}{current.busy ? ' · AI 执行中' : ''}</span></div>
           <div className="zt-actions"><button disabled={actionBusy || current.state !== 'ready' || !current.agentReady || current.uncertain} onClick={() => void action('bind', parameters)}>{currentBound ? '已绑定 AI' : '绑定 AI'}</button>
             <label className={`zt-mode ${currentBound && bound.mode === 'readwrite' ? 'write' : ''}`} title="未勾选：读模式，AI 仅可使用内置查询工具；勾选：读写模式，AI 可执行已授权的命令。"><input type="checkbox" aria-label="允许AI写操作" checked={Boolean(currentBound && bound.mode === 'readwrite')}
@@ -130,7 +137,7 @@ export function Workbench({ ctx, sessionId, visible = true, onClose }: { ctx: Cl
           </>}
         </aside></>}
     </div>
-    {hostEditor !== false && <HostEditor ctx={ctx} host={hostEditor ?? undefined} folders={catalog?.folders ?? []} revision={catalog?.revision} onClose={() => setHostEditor(false)} onSaved={() => void loadCatalog()} />}
+    {hostEditor !== false && <HostEditor ctx={ctx} host={hostEditor ?? undefined} folders={catalog?.folders ?? []} credentials={catalog?.credentials ?? []} defaultCredentialId={catalog?.defaultCredentialId} revision={catalog?.revision} onClose={() => setHostEditor(false)} onSaved={() => void loadCatalog()} />}
     {jumpEditor !== false && <JumpEditor ctx={ctx} profile={jumpEditor ?? undefined} revision={catalog?.revision} onClose={() => setJumpEditor(false)} onSaved={() => void loadCatalog()} />}
     {folderEditor !== false && <FolderEditor ctx={ctx} folder={folderEditor ?? undefined} folders={catalog?.folders ?? []} revision={catalog?.revision} onClose={() => setFolderEditor(false)} onSaved={() => void loadCatalog()} />}
     {accounts && <Modal title={`选择账号 · ${asset?.name ?? ''}`} onClose={() => setAccounts(undefined)}><div className="zt-account-list">{accounts.map((account: any) => <button key={account.accountId} disabled={!account.canConnect || actionBusy} onClick={() => { void connect({ kind: 'jumpserver', instanceId, assetId: asset.assetId, accountId: account.accountId, label: asset.name, accountName: account.name || account.username }); setAccounts(undefined) }}><strong>{account.name}</strong><span>{account.username}{!account.canConnect ? ' · 无连接权限' : ''}</span></button>)}{!accounts.length && <p>没有可用账号</p>}</div></Modal>}

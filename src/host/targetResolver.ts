@@ -80,7 +80,9 @@ export class TargetResolver {
     if (!host || host.length > 253 || /[\s/@?#\\]/.test(host)) throw new ZtermError('invalid_target', '未找到目标，请提供可连接的主机名或 IP')
     const username = request.username ?? defaultSshUsername(config.defaultSshUsername), port = request.port ?? 22
     const hostId = `auto-${createHash('sha256').update(JSON.stringify([host, port, username])).digest('hex').slice(0, 32)}`
-    const savedHost = await this.deps.saveHost({ id: hostId, kind: 'ssh', label: request.label ?? host, host, port, username, authType: 'key-file' }, signal)
+    const latest = this.deps.config(), credential = latest.credentials.find((c) => c.id === latest.defaultCredentialId)
+    const savedHost = await this.deps.saveHost({ id: hostId, kind: 'ssh', label: request.label ?? host, host, port, username,
+      authType: credential?.authType ?? 'key-file', ...(credential ? { credentialId: credential.id } : {}) }, signal)
     checkCancelled(signal)
     return { targetId: savedHost.id }
   }

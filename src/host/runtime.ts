@@ -11,7 +11,7 @@ import { fetchJumpserverAssets, fetchJumpserverNodes, fetchJumpserverNodeAssets,
 import { normalizeSshHost, normalizeSshPort } from '../core/sshHostTrust'
 import type { AgentToolResult } from '../core/toolTypes'
 import type { Config, ConnectTarget, AutomaticTarget, TargetIdentity, TerminalView, BindingView, Operation, WorkspaceView, OutputFrame, PollResult, HostTarget, ToolExec } from '../shared/types'
-import { id, label, integer } from './config'
+import { id, label, integer, hostAuthentication } from './config'
 import { RecordStore } from './store'
 import { readDefaultPrivateKey } from './defaultSsh'
 import { ZtermError, checkCancelled } from './errors'
@@ -70,17 +70,18 @@ export class ZtermRuntime {
     this.secrets.add(result.value); return result.value
   }
   private async sshOptions(host: HostTarget, signal?: AbortSignal) {
+    const auth = hostAuthentication(host, this.deps.config())
     let defaultKey: string | undefined
     let filePassphrase: string | undefined
-    if (host.authType === 'key-file') {
-      filePassphrase = await this.secret(host.passphraseRef)
-      defaultKey = await readDefaultPrivateKey(host.privateKeyPath || this.deps.config().defaultPrivateKeyPath, filePassphrase, signal, this.deps.defaultSshHome)
+    if (auth.authType === 'key-file') {
+      filePassphrase = await this.secret(auth.passphraseRef)
+      defaultKey = await readDefaultPrivateKey(auth.privateKeyPath || this.deps.config().defaultPrivateKeyPath, filePassphrase, signal, this.deps.defaultSshHome)
       this.secrets.add(defaultKey)
     }
     return { host: host.host, port: host.port, username: host.username, requireHostTrust: true,
-      ...(host.authType === 'password' ? { password: await this.secret(host.credentialRef) } : {}),
-      ...(host.authType === 'key' ? { privateKey: await this.secret(host.credentialRef), passphrase: await this.secret(host.passphraseRef) } : {}),
-      ...(host.authType === 'key-file' ? { privateKey: defaultKey, passphrase: filePassphrase } : {}) }
+      ...(auth.authType === 'password' ? { password: await this.secret(auth.credentialRef) } : {}),
+      ...(auth.authType === 'key' ? { privateKey: await this.secret(auth.credentialRef), passphrase: await this.secret(auth.passphraseRef) } : {}),
+      ...(auth.authType === 'key-file' ? { privateKey: defaultKey, passphrase: filePassphrase } : {}) }
   }
   private async jumpParams(instanceId: string): Promise<JumpserverConnectionParams> {
     const profile = this.deps.config().jumpservers.find((p) => p.id === instanceId)

@@ -1,17 +1,19 @@
 import Schema from '@deepseek-ai/schemastery'
 import { isAbsolute } from 'node:path'
 import { normalizeSshHost, normalizeSshPort, normalizeSshUsername } from '../core/sshHostTrust'
-import type { Config, HostTarget, HostFolder, JumpProfile } from '../shared/types'
+import type { Config, HostTarget, HostFolder, JumpProfile, SavedCredential } from '../shared/types'
 
 export const DEFAULT_CONFIG: Config = {
-  hosts: [], folders: [], jumpservers: [], allowLocalTerminal: false, allowExternalTargets: false,
-  defaultSshUsername: '', defaultPrivateKeyPath: '',
+  hosts: [], folders: [], jumpservers: [], credentials: [], allowLocalTerminal: false, allowExternalTargets: false,
+  defaultSshUsername: '', defaultPrivateKeyPath: '', defaultCredentialId: '',
   defaultPanelWidth: 60, maxSessions: 12, maxWriteCalls: 100, commandTimeoutMs: 30000,
 }
 export const ConfigSchema = Schema.object({
   hosts: Schema.any().default([]).volatile().description('远程主机；凭据使用 DSH_ZTERM_ 引用。'),
   folders: Schema.any().default([]).volatile().description('主机文件夹。'),
   jumpservers: Schema.any().default([]).volatile().description('JumpServer 实例与凭据引用。'),
+  credentials: Schema.any().default([]).volatile().description('可复用的凭证名称、类型及 DSH 凭据引用，不含秘密。'),
+  defaultCredentialId: Schema.string().default('').volatile().description('新主机使用的默认私钥凭证；留空使用宿主默认私钥文件。'),
   allowLocalTerminal: Schema.boolean().default(false).volatile().description('允许打开 DSH 宿主的本地终端。'),
   allowExternalTargets: Schema.boolean().default(false).volatile().description('允许使用已配置 SSH 凭据连接上层提供的资产地址。'),
   defaultSshUsername: Schema.string().default('').volatile().description('新主机默认登录账号；留空使用 DSH 宿主当前用户，对话明确指定账号时优先采用。'),
@@ -55,12 +57,29 @@ export function validateHost(raw: any): HostTarget {
   // 旧 Agent／默认文件配置保留主机，统一转为宿主私钥文件认证。
   const authType = ['agent', 'default-key'].includes(raw.authType) ? 'key-file' : raw.authType
   if (!host || !port || !username || /[\s/@?#\\]/.test(host) || !['password', 'key', 'key-file'].includes(authType)) throw new Error('SSH 地址、端口、账号或认证方式无效')
-  const privateKeyPath = authType === 'key-file' ? keyFilePath(raw.privateKeyPath ?? '') : ''
+  const credentialId = raw.credentialId ? id(raw.credentialId, '凭证标识') : undefined
+  const privateKeyPath = !credentialId && authType === 'key-file' ? keyFilePath(raw.privateKeyPath ?? '') : ''
   return { id: id(raw.id), label: label(raw.label), kind: 'ssh', host, port, username, authType,
     ...(raw.folderId ? { folderId: id(raw.folderId) } : {}),
-    ...(['password', 'key'].includes(authType) ? { credentialRef: credentialRef(raw.credentialRef)! } : {}),
-    ...(['key', 'key-file'].includes(authType) && raw.passphraseRef ? { passphraseRef: credentialRef(raw.passphraseRef) } : {}),
-    ...(privateKeyPath ? { privateKeyPath } : {}) }
+    ...(credentialId ? { credentialId } : {
+      ...(['password', 'key'].includes(authType) ? { credentialRef: credentialRef(raw.credentialRef)! } : {}),
+      ...(['key', 'key-file'].includes(authType) && raw.passphraseRef ? { passphraseRef: credentialRef(raw.passphraseRef) } : {}),
+      ...(privateKeyPath ? { privateKeyPath } : {}) }) }
+}
+export function validateCredential(raw: any): SavedCredential {
+  if (!raw || ['secret', 'content', 'password', 'privateKey', 'passphrase'].some((key) => key in raw)) throw new Error('凭证配置只接受名称、类型和引用，不接受秘密内容')
+  if (!['password', 'key', 'key-file'].includes(raw.authType)) throw new Error('凭证类型无效')
+  const path = raw.authType === 'key-file' ? keyFilePath(raw.privateKeyPath ?? '') : ''
+  if (raw.authType === 'key-file' && !path) throw new Error('请填写宿主私钥文件路径')
+  return { id: id(raw.id, '凭证标识'), label: label(raw.label), authType: raw.authType,
+    ...(raw.authType === 'key-file' ? { privateKeyPath: path } : { credentialRef: credentialRef(raw.credentialRef)! }),
+    ...(raw.authType !== 'password' && raw.passphraseRef ? { passphraseRef: credentialRef(raw.passphraseRef) } : {}) }
+}
+export function hostAuthentication(host: HostTarget, config: Config): HostTarget | SavedCredential {
+  if (!host.credentialId) return host
+  const credential = config.credentials.find((c) => c.id === host.credentialId)
+  if (!credential) throw new Error('主机选用的凭证已不存在，请重新选择')
+  return credential
 }
 function optionalText(value: unknown, max: number): string {
   if (typeof value !== 'string' || value.length > max || /[\x00-\x1f\x7f]/.test(value)) throw new Error('默认 SSH 设置无效')
@@ -84,16 +103,26 @@ export function validateJump(raw: any): JumpProfile {
 export function validateConfig(value: unknown): Config {
   const raw = { ...DEFAULT_CONFIG, ...plain(value) }
   const hosts = array(raw.hosts, 20000).map(validateHost)
+  const credentials = array(raw.credentials, 500).map(validateCredential)
   const folders: HostFolder[] = array(raw.folders, 2000).map((f) => ({ id: id(f.id), label: label(f.label), ...(f.parentId ? { parentId: id(f.parentId) } : {}) }))
   const jumpservers = array(raw.jumpservers, 32).map(validateJump)
-  for (const entries of [hosts, folders, jumpservers]) if (new Set(entries.map((entry) => entry.id)).size !== entries.length) throw new Error('列表包含重复标识')
+  for (const entries of [hosts, folders, jumpservers, credentials]) if (new Set(entries.map((entry) => entry.id)).size !== entries.length) throw new Error('列表包含重复标识')
+  if (new Set(credentials.map((c) => c.label.toLowerCase())).size !== credentials.length) throw new Error('凭证名称已存在，请使用不同名称')
+  const credentialMap = new Map(credentials.map((c) => [c.id, c]))
+  for (const host of hosts) if (host.credentialId) {
+    const credential = credentialMap.get(host.credentialId)
+    if (!credential) throw new Error('主机选用的凭证不存在')
+    host.authType = credential.authType
+  }
+  const defaultCredentialId = raw.defaultCredentialId ? id(raw.defaultCredentialId, '默认凭证') : ''
+  if (defaultCredentialId && (!credentialMap.has(defaultCredentialId) || credentialMap.get(defaultCredentialId)!.authType === 'password')) throw new Error('默认 SSH 凭证须选择已保存的私钥或私钥文件')
   const folderMap = new Map(folders.map((f) => [f.id, f]))
   for (const folder of folders) {
     const seen = new Set([folder.id]); let next = folder.parentId
     while (next) { if (seen.has(next) || !folderMap.has(next)) throw new Error('文件夹父节点不存在或存在循环'); seen.add(next); next = folderMap.get(next)!.parentId }
   }
   for (const host of hosts) if (host.folderId && !folderMap.has(host.folderId)) throw new Error('主机所属文件夹不存在')
-  return { hosts, folders, jumpservers, allowLocalTerminal: boolean(raw.allowLocalTerminal, false), allowExternalTargets: boolean(raw.allowExternalTargets, false),
+  return { hosts, folders, jumpservers, credentials, defaultCredentialId, allowLocalTerminal: boolean(raw.allowLocalTerminal, false), allowExternalTargets: boolean(raw.allowExternalTargets, false),
     defaultSshUsername: optionalText(raw.defaultSshUsername, 200), defaultPrivateKeyPath: keyFilePath(raw.defaultPrivateKeyPath),
     defaultPanelWidth: integer(raw.defaultPanelWidth, 60, 30, 80), maxSessions: integer(raw.maxSessions, 12, 1, 32),
     maxWriteCalls: integer(raw.maxWriteCalls, 100, 1, 1000), commandTimeoutMs: integer(raw.commandTimeoutMs, 30000, 1000, 120000) }

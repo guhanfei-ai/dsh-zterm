@@ -1,7 +1,8 @@
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import { ConfigSchema, DEFAULT_CONFIG, validateConfig, validateHost, validateJump, credentialRef, id, plain } from './host/config'
+import ssh2 from 'ssh2'
+import { ConfigSchema, DEFAULT_CONFIG, validateConfig, validateHost, validateJump, validateCredential, credentialRef, id, plain } from './host/config'
 import { RecordStore } from './host/store'
 import { ZtermRuntime, ZtermError } from './host/runtime'
 import { TargetResolver } from './host/targetResolver'
@@ -52,7 +53,7 @@ export function createPlugin(ctx: any, entryConfig: any = {}, deps: { dataRoot?:
     return config()
   }
   const newRef = (kind: string, targetId: string) => credentialRef(`DSH_ZTERM_${kind}_${id(targetId).replace(/[^\w]/g, '_').toUpperCase()}_${randomUUID().replaceAll('-', '').toUpperCase()}`)!
-  const referenced = () => new Set([...config().hosts.flatMap((h) => [h.credentialRef, h.passphraseRef]), ...config().jumpservers.flatMap((p) => [p.credentialRef, p.accessKeyIdRef])])
+  const referenced = () => new Set([...config().hosts.flatMap((h) => [h.credentialRef, h.passphraseRef]), ...config().credentials.flatMap((c) => [c.credentialRef, c.passphraseRef]), ...config().jumpservers.flatMap((p) => [p.credentialRef, p.accessKeyIdRef])])
   // 新秘密使用新引用；修订检查失败不能覆盖仍在使用的凭据。
   const saveWithCredentials = async (patch: any, expected: number | undefined, secrets: Array<[string, string]>) => {
     checkRevision(expected); validateConfig({ ...config(), ...patch })
@@ -99,19 +100,58 @@ export function createPlugin(ctx: any, entryConfig: any = {}, deps: { dataRoot?:
       const filtered = cfg.hosts.filter((host) => `${host.label} ${host.host}`.toLowerCase().includes(query)
         && (!payload.folderId || (payload.folderId === 'root' ? !host.folderId : host.folderId === payload.folderId)))
       const hosts = filtered.slice(offset, offset + 200)
-      const refs = [...new Set([...hosts.flatMap((h) => [h.credentialRef, h.passphraseRef]), ...cfg.jumpservers.flatMap((p) => [p.credentialRef, p.accessKeyIdRef])].filter(Boolean) as string[])]
+      const refs = [...new Set([...hosts.flatMap((h) => [h.credentialRef, h.passphraseRef]), ...cfg.credentials.flatMap((c) => [c.credentialRef, c.passphraseRef]), ...cfg.jumpservers.flatMap((p) => [p.credentialRef, p.accessKeyIdRef])].filter(Boolean) as string[])]
       return { ...cfg, hosts, total: filtered.length, offset, revision: descriptor()?.revision,
         credentialsConfigured: Object.fromEntries(await Promise.all(refs.map(async (ref) => [ref, typeof ctx.credentials.describe === 'function' ? Boolean((await ctx.credentials.describe(ref))?.configured) : Boolean((await ctx.credentials.resolve(ref))?.value)]))) }
     }
     if (method === 'config') {
-      const allowed = ['allowLocalTerminal', 'allowExternalTargets', 'defaultSshUsername', 'defaultPrivateKeyPath', 'defaultPanelWidth', 'maxSessions', 'maxWriteCalls', 'commandTimeoutMs']
+      const allowed = ['allowLocalTerminal', 'allowExternalTargets', 'defaultSshUsername', 'defaultPrivateKeyPath', 'defaultCredentialId', 'defaultPanelWidth', 'maxSessions', 'maxWriteCalls', 'commandTimeoutMs']
       const patch = Object.fromEntries(Object.entries(payload.patch ?? {}).filter(([key]) => allowed.includes(key)))
       await update(patch, payload.revision); return { saved: true, revision: descriptor()?.revision }
     }
     if (method === 'hosts/export') return config().hosts.map((host) => `# ${host.label}\nHost ${host.id.replace(/[^\w-]/g, '_')}\n  HostName ${host.host}\n  Port ${host.port}\n  User ${host.username}\n`).join('\n')
+    if (method === 'credential/save') {
+      checkRevision(payload.revision)
+      const raw = payload.credential ?? {}, credentialId = raw.id ? id(raw.id, '凭证标识') : randomUUID()
+      const previous = config().credentials.find((c) => c.id === credentialId)
+      if (raw.id && !previous) throw new ZtermError('unknown_credential', '凭证不存在，请刷新列表')
+      if (payload.content !== undefined && typeof payload.content !== 'string') throw new ZtermError('invalid_credential', '凭证内容必须是文本')
+      if (payload.passphrase !== undefined && typeof payload.passphrase !== 'string') throw new ZtermError('invalid_credential', '私钥口令必须是文本')
+      const content = payload.content ?? '', phrase = payload.passphrase ?? '', secrets: Array<[string, string]> = []
+      if (content.length > 100000 || phrase.length > 4096) throw new ZtermError('secret_too_long', '凭证内容或口令超过长度上限')
+      const sameType = previous?.authType === raw.authType
+      const next: any = { id: credentialId, label: raw.label, authType: raw.authType }
+      if (raw.authType === 'key-file') next.privateKeyPath = content || (sameType ? previous?.privateKeyPath : undefined)
+      else {
+        next.credentialRef = sameType ? previous?.credentialRef : undefined
+        if (content) { next.credentialRef = newRef('CREDENTIAL', credentialId); secrets.push([next.credentialRef, content]) }
+        if (!next.credentialRef) throw new ZtermError('credential_required', '请填写凭证内容')
+      }
+      if (raw.authType !== 'password') {
+        next.passphraseRef = sameType && payload.clearPassphrase !== true ? previous?.passphraseRef : undefined
+        if (phrase && payload.clearPassphrase !== true) { next.passphraseRef = newRef('PHRASE', credentialId); secrets.push([next.passphraseRef, phrase]) }
+      }
+      if (raw.authType === 'key' && (content || phrase || payload.clearPassphrase === true)) {
+        const key = content || (await ctx.credentials.resolve(previous?.credentialRef))?.value
+        const passphrase = payload.clearPassphrase === true ? undefined : phrase || (next.passphraseRef ? (await ctx.credentials.resolve(next.passphraseRef))?.value : undefined)
+        const parsed = key ? ssh2.utils.parseKey(key, passphrase) : undefined
+        if (!parsed || parsed instanceof Error || !(Array.isArray(parsed) ? parsed : [parsed]).some((k) => k.getPrivatePEM())) throw new ZtermError('invalid_private_key', '私钥内容无效或口令不正确，请检查文件和口令')
+      }
+      const credential = validateCredential(next)
+      await saveWithCredentials({ credentials: [...config().credentials.filter((c) => c.id !== credentialId), credential] }, payload.revision, secrets)
+      return { id: credentialId }
+    }
     if (method === 'host/save') {
       checkRevision(payload.revision)
       const rawHost = { ...payload.host, id: payload.host?.id ?? randomUUID(), kind: 'ssh' }
+      if (rawHost.credentialId) {
+        const credential = config().credentials.find((c) => c.id === id(rawHost.credentialId, '凭证标识'))
+        if (!credential) throw new ZtermError('unknown_credential', '请选择已保存的凭证')
+        if (payload.secret || payload.passphrase) throw new ZtermError('invalid_credential', '选用已保存凭证时无需再次提交秘密内容')
+        const host = validateHost({ ...rawHost, authType: credential.authType })
+        await saveWithCredentials({ hosts: [...config().hosts.filter((h) => h.id !== host.id), host] }, payload.revision, [])
+        return { id: host.id }
+      }
       const previous = config().hosts.find((h) => h.id === rawHost.id), secrets: Array<[string, string]> = []
       if (previous && previous.authType !== rawHost.authType && rawHost.credentialRef === previous.credentialRef) rawHost.credentialRef = undefined
       rawHost.credentialRef = ['agent', 'default-key', 'key-file'].includes(rawHost.authType) ? undefined : rawHost.credentialRef ?? (previous?.authType === rawHost.authType ? previous?.credentialRef : undefined)
@@ -150,7 +190,11 @@ export function createPlugin(ctx: any, entryConfig: any = {}, deps: { dataRoot?:
     }
     if (method === 'jump/delete') { await update({ jumpservers: config().jumpservers.filter((p) => p.id !== id(payload.id)) }, payload.revision); return { deleted: true } }
     if (method === 'jump/query') return runtime.jumpQuery(payload.instanceId, payload.operation, payload)
-    if (method === 'credential/unset') { await ctx.credentials.unset(credentialRef(payload.ref)!); return { removed: true } }
+    if (method === 'credential/unset') {
+      const ref = credentialRef(payload.ref)!
+      if (referenced().has(ref)) throw new ZtermError('credential_in_use', '凭证仍被主机、实例或凭证列表使用，不能清除')
+      await ctx.credentials.unset(ref); return { removed: true }
+    }
     const sid = session(payload.sessionId)
     if (method === 'client/attach') { runtime.attachClient(sid, payload.pageId); return {} }
     if (method === 'poll') return runtime.poll(sid, payload.cursor ?? -1)
@@ -171,7 +215,7 @@ export function createPlugin(ctx: any, entryConfig: any = {}, deps: { dataRoot?:
     if (method === 'terminal/export') return runtime.poll(sid, -1).snapshots?.find((s) => s.terminalId === payload.terminalId)?.text ?? ''
     throw new ZtermError('unknown_method', `未知的 ${PRODUCT_NAME} 操作`)
   }
-  const mutations = new Set(['config', 'host/save', 'host/delete', 'folder/save', 'folder/delete', 'jump/save', 'jump/delete', 'credential/unset'])
+  const mutations = new Set(['config', 'host/save', 'host/delete', 'folder/save', 'folder/delete', 'jump/save', 'jump/delete', 'credential/save', 'credential/unset'])
   const handler = async (endpoint: string, payload: unknown, signal: AbortSignal): Promise<RpcResult> => {
     if (signal.aborted) return { ok: false, error: { code: 'aborted', message: '请求已取消', details: {} } }
     try {
@@ -183,7 +227,7 @@ export function createPlugin(ctx: any, entryConfig: any = {}, deps: { dataRoot?:
     catch (error) { return { ok: false, error: { code: error instanceof ZtermError ? error.code : 'invalid_request', message: runtime.sanitize(error instanceof Error ? error.message : '请求失败'), details: {} } } }
   }
   // /api 的唯一拦截器由 DSH Gateway 持有；精确 Fetch 路由仍经过 Connection 认证。
-  const methods = ['catalog', 'config', 'hosts/export', 'host/save', 'host/delete', 'folder/save', 'folder/delete', 'jump/save', 'jump/delete', 'jump/query', 'credential/unset', 'client/attach', 'poll', 'connect', 'bind', 'mode', 'input', 'shell-ready', 'resize', 'trust', 'trust/reset', 'stop', 'disconnect', 'close', 'reconnect', 'saved-workspace', 'restore', 'results', 'terminal/export']
+  const methods = ['catalog', 'config', 'hosts/export', 'host/save', 'host/delete', 'folder/save', 'folder/delete', 'jump/save', 'jump/delete', 'jump/query', 'credential/save', 'credential/unset', 'client/attach', 'poll', 'connect', 'bind', 'mode', 'input', 'shell-ready', 'resize', 'trust', 'trust/reset', 'stop', 'disconnect', 'close', 'reconnect', 'saved-workspace', 'restore', 'results', 'terminal/export']
   for (const method of methods) ctx.effect(() => ctx.connection.fetch.register({
     path: `/api/zterm/${method}`, methods: ['POST'], requestBody: 'buffered',
     async fetch(request: Request) {

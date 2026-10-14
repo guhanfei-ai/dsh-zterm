@@ -42,7 +42,12 @@ try {
     return envelope.result
   }
   assert.equal((await call('gateway/ping')).value, 'pong')
-  assert.equal((await call('zterm/catalog')).ok, true)
+  const catalog = await call('zterm/catalog')
+  assert.equal(catalog.ok, true)
+  assert.deepEqual(catalog.value.credentials, [])
+  const invalidCredential = await call('zterm/credential/save', { credential: { label: 'SDK fixture', authType: 'key-file' }, content: 'relative-fixture.pem' })
+  assert.equal(invalidCredential.ok, false)
+  assert.equal(invalidCredential.error.code, 'invalid_request')
   assert.equal((await call('zterm/poll', { sessionId: 'sdk-session', cursor: -1 })).ok, true)
   assert.equal((await call('zterm/poll', { sessionId: 'unknown' })).ok, false)
   assert.equal(connection.admit(new Request('http://127.0.0.1/api/zterm/catalog', { headers: { origin: 'https://untrusted.example.invalid' } })).rejection, 403)

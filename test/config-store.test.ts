@@ -40,4 +40,10 @@ describe('配置与持久记录', () => {
     const reset = mergeFrames(next, { reset: true, cursor: 5, snapshots: [{ terminalId: 't', generation: 2, text: 'snapshot' }], workspace: { terminals: [{ id: 't' }] } })
     expect(reset.get('t')?.text).toBe('snapshot')
   })
+  it('命名凭证配置拒绝明文内容、悬空引用和默认密码凭证', () => {
+    const credential = { id: 'cred-1', label: 'Shared', authType: 'password', credentialRef: 'DSH_ZTERM_SHARED' }
+    expect(() => validateConfig({ credentials: [{ ...credential, content: 'raw-secret' }] })).toThrow('秘密')
+    expect(() => validateConfig({ credentials: [credential], defaultCredentialId: credential.id })).toThrow('私钥')
+    expect(() => validateConfig({ hosts: [{ id: 'h', label: 'H', kind: 'ssh', host: '192.0.2.21', username: 'operator', authType: 'password', credentialId: 'missing' }] })).toThrow('不存在')
+  })
 })

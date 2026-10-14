@@ -39,10 +39,12 @@ export class LocalPtySession extends EventEmitter {
     // 复位主动断开标记：当前架构每实例只 connect 一次，但若未来复用实例重连，
     // 残留的 disconnectRequested=true 会把真正的启动失败吞成 resolve
     this.disconnectRequested = false
-    const pty = await import('node-pty')
+    // CommonJS 经宿主加载后可能仅暴露 default，兼容两种模块导出形式。
+    const ptyModule = await import('node-pty') as typeof pty & { default?: typeof pty }
+    const nodePty = ptyModule.default ?? ptyModule
     return new Promise<void>((resolve, reject) => {
       try {
-        this.ptyProcess = pty.spawn(shell, [], {
+        this.ptyProcess = nodePty.spawn(shell, [], {
           name: 'xterm-256color',
           cols,
           rows,

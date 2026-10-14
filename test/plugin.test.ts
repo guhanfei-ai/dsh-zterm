@@ -165,4 +165,79 @@ describe('DSH 宿主接口', () => {
       expect([...fixture.credentials.values()]).toEqual(['fixture-passphrase']); expect(JSON.stringify(catalog)).not.toContain('fixture-passphrase')
     } finally { fixture.dispose() }
   })
+  it('命名密码凭证可被两台主机共用，列表只返回元数据，留空编辑保留秘密', async () => {
+    const f = setup()
+    try {
+      const saved = await f.call('credential/save', { credential: { label: 'Shared', authType: 'password' }, content: 'fixture-secret-password', revision: 1 })
+      expect(saved.ok).toBe(true)
+      for (const [i, host] of ['192.0.2.21', '192.0.2.22'].entries()) expect((await f.call('host/save', { host: { label: 'Host ' + i, host, username: 'operator', authType: 'key-file', credentialId: saved.value.id }, revision: 2 + i })).ok).toBe(true)
+      const original = f.plugin.config().credentials[0]
+      f.ctx.credentials.describe = async () => ({ configured: true })
+      f.ctx.credentials.resolve = async () => { throw new Error('不应读取秘密') }
+      expect((await f.call('credential/save', { credential: { id: saved.value.id, label: 'Renamed', authType: 'password' }, content: '', revision: 4 })).ok).toBe(true)
+      const catalog = (await f.call('catalog')).value
+      expect(catalog.credentials[0]).toMatchObject({ label: 'Renamed', credentialRef: original.credentialRef })
+      expect(catalog.hosts.every((h: any) => h.authType === 'password' && h.credentialId === saved.value.id && !h.credentialRef)).toBe(true)
+      expect([...f.credentials.values()]).toEqual(['fixture-secret-password'])
+      expect(JSON.stringify(catalog)).not.toContain('fixture-secret-password')
+      expect((await f.call('credential/unset', { ref: original.credentialRef })).ok).toBe(false)
+    } finally { f.dispose() }
+  })
+  it('命名凭证并发、重复和失败保存不会覆盖或遗留新秘密', async () => {
+    const f = setup()
+    try {
+      const request = (content: string, revision: number) => f.call('credential/save', { credential: { label: 'Shared', authType: 'password' }, content, revision })
+      expect((await Promise.all([request('old-fixture-password', 1), request('second-fixture-password', 1)])).map((r) => r.ok)).toEqual([true, false])
+      expect((await request('duplicate-fixture-password', 2)).ok).toBe(false)
+      const original = f.plugin.config().credentials[0]
+      f.ctx.settings.update = async () => { throw new Error('fixture storage unavailable') }
+      expect((await f.call('credential/save', { credential: { id: original.id, label: 'Shared', authType: 'password' }, content: 'new-fixture-password', revision: 2 })).ok).toBe(false)
+      expect(f.plugin.config().credentials[0]).toEqual(original)
+      expect([...f.credentials.values()]).toEqual(['old-fixture-password'])
+    } finally { f.dispose() }
+  })
+  it('默认命名私钥供自动新增主机使用，口令不进入配置或工具结果', async () => {
+    const options: any[] = []
+    class NamedTerminal extends TerminalSession {
+      async connect(value: any) { options.push(value); this.connected = true; this.currentHost = value; this.verifiedHostKey = { algorithm: 'ssh-ed25519', fingerprint: 'SHA256:' + 'A'.repeat(43) } }
+      async openShell() {}
+      isShellReady() { return this.connected }
+      disconnect() { this.connected = false; this.emit('closed') }
+    }
+    const f = setup({}, new Map(), { terminalFactory: (id: string, generation: number) => new NamedTerminal(id, generation) })
+    const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs1', format: 'pem', cipher: 'aes-256-cbc', passphrase: 'fixture-phrase' }, publicKeyEncoding: { type: 'spki', format: 'pem' } })
+    try {
+      const saved = await f.call('credential/save', { credential: { label: 'Default key', authType: 'key' }, content: privateKey, passphrase: 'fixture-phrase', revision: 1 })
+      expect(saved.ok).toBe(true)
+      expect((await f.call('config', { patch: { defaultCredentialId: saved.value.id }, revision: 2 })).ok).toBe(true)
+      const connected = await f.call('connect', { sessionId: 'session-1', target: { host: 'operator@192.0.2.23' } })
+      expect(connected.ok).toBe(true)
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      expect(options[0]).toMatchObject({ privateKey, passphrase: 'fixture-phrase' })
+      const catalog = (await f.call('catalog')).value
+      expect(catalog.hosts[0]).toMatchObject({ credentialId: saved.value.id, authType: 'key' })
+      expect(JSON.stringify([catalog, connected])).not.toContain(privateKey)
+      expect(JSON.stringify([catalog, connected])).not.toContain('fixture-phrase')
+      expect(f.plugin.runtime.bind('session-1', connected.value.id, connected.value.generation).mode).toBe('read')
+      expect((await f.call('credential/save', { credential: { id: saved.value.id, label: 'Default key', authType: 'password' }, content: 'fixture-password', revision: 4 })).ok).toBe(false)
+    } finally { f.dispose() }
+  })
+  it('宿主文件凭证保存一次路径；未知引用、默认密码和无效私钥被拒绝', async () => {
+    const f = setup()
+    try {
+      const file = await f.call('credential/save', { credential: { label: 'Host key', authType: 'key-file' }, content: '/srv/dsh/.ssh/fixture_key', passphrase: 'fixture-file-phrase', revision: 1 })
+      expect(file.ok).toBe(true)
+      expect((await f.call('host/save', { host: { label: 'H', host: '192.0.2.25', username: 'operator', authType: 'key-file', credentialId: file.value.id }, revision: 2 })).ok).toBe(true)
+      const catalog = (await f.call('catalog')).value
+      expect(catalog.credentials[0]).toMatchObject({ privateKeyPath: '/srv/dsh/.ssh/fixture_key' })
+      expect(catalog.hosts[0]).not.toHaveProperty('privateKeyPath'); expect(JSON.stringify(catalog)).not.toContain('fixture-file-phrase')
+      expect((await f.call('credential/save', { credential: { label: 'Relative', authType: 'key-file' }, content: 'relative/key', revision: 3 })).ok).toBe(false)
+      expect((await f.call('host/save', { host: { label: 'Unknown', host: '192.0.2.26', username: 'operator', authType: 'password', credentialId: 'missing' }, revision: 3 })).ok).toBe(false)
+      const malformed = 'fixture-secret-that-must-not-appear-in-error'
+      const bad = await f.call('credential/save', { credential: { label: 'Bad', authType: 'key' }, content: malformed, revision: 3 })
+      expect(bad.ok).toBe(false); expect(JSON.stringify(bad)).not.toContain(malformed)
+      const password = await f.call('credential/save', { credential: { label: 'Password', authType: 'password' }, content: 'fixture-password', revision: 3 })
+      expect((await f.call('config', { patch: { defaultCredentialId: password.value.id }, revision: 4 })).ok).toBe(false)
+    } finally { f.dispose() }
+  })
 })

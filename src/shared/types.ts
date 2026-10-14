@@ -1,6 +1,9 @@
 export interface HostTarget {
   id: string; label: string; folderId?: string; kind: 'ssh'; host: string; port: number; username: string
-  authType: 'password' | 'key' | 'key-file'; credentialRef?: string; passphraseRef?: string; privateKeyPath?: string
+  authType: 'password' | 'key' | 'key-file'; credentialId?: string; credentialRef?: string; passphraseRef?: string; privateKeyPath?: string
+}
+export interface SavedCredential {
+  id: string; label: string; authType: HostTarget['authType']; credentialRef?: string; passphraseRef?: string; privateKeyPath?: string
 }
 export interface HostFolder { id: string; label: string; parentId?: string }
 export interface JumpProfile {
@@ -8,8 +11,8 @@ export interface JumpProfile {
   credentialRef: string; accessKeyIdRef?: string; verifyTls: boolean
 }
 export interface Config {
-  hosts: HostTarget[]; folders: HostFolder[]; jumpservers: JumpProfile[]; allowLocalTerminal: boolean
-  allowExternalTargets: boolean; defaultSshUsername: string; defaultPrivateKeyPath: string
+  hosts: HostTarget[]; folders: HostFolder[]; jumpservers: JumpProfile[]; credentials: SavedCredential[]; allowLocalTerminal: boolean
+  allowExternalTargets: boolean; defaultSshUsername: string; defaultPrivateKeyPath: string; defaultCredentialId: string
   defaultPanelWidth: number; maxSessions: number; maxWriteCalls: number; commandTimeoutMs: number
 }
 export interface AutomaticTarget { kind?: 'auto'; host: string; username?: string; port?: number; label?: string }
