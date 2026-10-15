@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
@@ -74,6 +74,7 @@ try {
     checkedAt: new Date().toISOString(), platform: process.platform, node: process.version,
     defaultOnlyExport: true, nativePty: true, observed, independentVariables: true, resize: { cols: 92, rows: 24 },
     limitEnforced: true, closeAndReopen: true, reopenedTerminalId: reopened.id, userConfigurationLoaded: false }
+  await mkdir(new URL('../out/', import.meta.url), { recursive: true })
   await writeFile(new URL('../out/local-pty-check.json', import.meta.url), `${JSON.stringify(receipt, null, 2)}\n`)
   console.log(JSON.stringify(receipt))
 } finally {

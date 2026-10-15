@@ -13,7 +13,7 @@ export function FolderTree({ folders, selected, onSelect }: { folders: HostFolde
   const [collapsed, setCollapsed] = useState(new Set<string>())
   const rows = folderRows(folders), hidden = new Set<string>(), parents = new Set(folders.map((f) => f.parentId))
   return <nav className="zt-folder-tree" aria-label="主机文件夹">
-    {['', 'root'].map((id) => <button key={id} className={selected === id ? 'active' : ''} onClick={() => onSelect(id)}>{id ? '▱ 根目录' : '▤ 全部主机'}</button>)}
+    <button className={selected === '' ? 'active' : ''} onClick={() => onSelect('')}>▱ 根目录(全部主机)</button>
     {rows.map((folder) => {
       if (folder.parentId && (collapsed.has(folder.parentId) || hidden.has(folder.parentId))) { hidden.add(folder.id); return null }
       return <div key={folder.id} style={{ paddingLeft: Math.min(8, folder.depth) * 12 }}><button className="zt-folder-toggle" aria-label={`${collapsed.has(folder.id) ? '展开' : '收起'}文件夹 ${folder.label}`} disabled={!parents.has(folder.id)} onClick={() => setCollapsed((previous) => { const next = new Set(previous); next.has(folder.id) ? next.delete(folder.id) : next.add(folder.id); return next })}>{parents.has(folder.id) ? collapsed.has(folder.id) ? '▸' : '▾' : '·'}</button>
