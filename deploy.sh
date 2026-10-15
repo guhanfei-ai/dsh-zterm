@@ -274,7 +274,10 @@ cmd_publish() {
   # 先发 npm（不可变），再建 GitHub Release：任一步失败后重跑都不会重复发布
   if [[ "$npm_done" == "false" ]]; then
     printf '>> 发布 %s 到 npm（开启写操作2FA时会交互提示输入OTP）\n' "$(basename "$asset")"
-    npm --cache "$NPM_CACHE" --registry "$NPM_REGISTRY" publish "$asset" --access public --ignore-scripts ${NPM_OTP:+--otp="$NPM_OTP"}
+    # 路径必须带 ./ 前缀：npm(npa) 只把 ./x、/x、~x 识别为本地路径，
+    # 不带前缀的 dist/x.tgz 会被解析成 GitHub owner/repo 简写，
+    # 触发 git ls-remote ssh://git@github.com/dist/x.tgz.git 报 code 128
+    npm --cache "$NPM_CACHE" --registry "$NPM_REGISTRY" publish "./$asset" --access public --ignore-scripts ${NPM_OTP:+--otp="$NPM_OTP"}
   fi
 
   printf '>> 创建 GitHub Release %s 并上传 %s\n' "$GIT_TAG" "$(basename "$asset")"
