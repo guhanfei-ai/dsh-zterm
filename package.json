@@ -4,6 +4,12 @@
   "description": "zTerm：SSH、JumpServer、真实机器读工具与人类开启的读写操作",
   "type": "module",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/guhanfei-ai/dsh-zterm.git"
+  },
+  "homepage": "https://github.com/guhanfei-ai/dsh-zterm#readme",
+  "bugs": "https://github.com/guhanfei-ai/dsh-zterm/issues",
   "main": "lib/index.js",
   "exports": {
     ".": "./lib/index.js",
