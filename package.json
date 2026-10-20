@@ -1,6 +1,6 @@
 {
   "name": "dsh-zterm",
-  "version": "0.1.13",
+  "version": "0.1.14",
   "description": "zTerm：SSH、JumpServer、真实机器读工具与人类开启的读写操作",
   "type": "module",
   "license": "MIT",
