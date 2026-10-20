@@ -48,6 +48,34 @@ describe('DSH 宿主接口', () => {
     expect(await fixture.gate({ name: 'zterm_execute' }, async () => ({ kind: 'deny', reason: 'policy' }))).toEqual({ kind: 'deny', reason: 'policy' })
     fixture.dispose()
   })
+  it('文件夹更名保留主机归属和子目录，过期保存不能覆盖名称', async () => {
+    const host = { id: 'host-1', kind: 'ssh', label: 'Fixture host', host: '192.0.2.21', port: 22, username: 'operator', authType: 'key-file', folderId: 'apps' }
+    const fixture = setup({ folders: [{ id: 'apps', label: '应用服务' }, { id: 'child', label: '子目录', parentId: 'apps' }], hosts: [host] })
+    try {
+      expect((await fixture.call('folder/save', { folder: { id: 'apps', label: '新应用目录' }, revision: 1 })).ok).toBe(true)
+      const catalog = (await fixture.call('catalog')).value
+      expect(catalog.folders).toEqual(expect.arrayContaining([{ id: 'apps', label: '新应用目录' }, { id: 'child', label: '子目录', parentId: 'apps' }]))
+      expect(catalog.hosts[0]).toMatchObject({ id: host.id, folderId: 'apps' })
+      expect((await fixture.call('folder/save', { folder: { id: 'apps', label: '过期名称' }, revision: 1 })).ok).toBe(false)
+      expect((await fixture.call('catalog')).value.folders.find((f: any) => f.id === 'apps').label).toBe('新应用目录')
+    } finally { fixture.dispose() }
+  })
+  it('空文件夹可删除，搜索隐藏主机或子目录时仍拒绝删除非空文件夹', async () => {
+    const host = { id: 'host-1', kind: 'ssh', label: 'Fixture host', host: '192.0.2.21', port: 22, username: 'operator', authType: 'key-file', folderId: 'apps' }
+    const fixture = setup({ folders: [{ id: 'empty', label: '空目录' }, { id: 'apps', label: '应用服务' }, { id: 'parent', label: '父目录' }, { id: 'child', label: '子目录', parentId: 'parent' }], hosts: [host] })
+    try {
+      expect((await fixture.call('folder/delete', { id: 'empty', revision: 1 })).ok).toBe(true)
+      expect((await fixture.call('catalog', { folderId: 'apps', query: 'no-matching-host' })).value.hosts).toEqual([])
+      for (const id of ['apps', 'parent']) {
+        expect(await fixture.call('folder/delete', { id, revision: 2 })).toMatchObject({ ok: false, error: { code: 'folder_not_empty' } })
+      }
+      expect((await fixture.call('folder/delete', { id: 'child', revision: 2 })).ok).toBe(true)
+      expect((await fixture.call('folder/delete', { id: 'parent', revision: 3 })).ok).toBe(true)
+      const catalog = (await fixture.call('catalog')).value
+      expect(catalog.folders).toEqual([{ id: 'apps', label: '应用服务' }])
+      expect(catalog.hosts[0]).toMatchObject({ id: host.id, folderId: 'apps' })
+    } finally { fixture.dispose() }
+  })
   it('只读工具失败使用宿主失败通道，不包装为成功', async () => {
     const fixture = setup(), tool = fixture.registered.find((t) => t.name === 'zterm_execute')
     await expect(tool.execute({ command: 'printf x' }, { callId: 'c', agent: { id: 'session-1' } })).rejects.toThrow('绑定')

@@ -8,6 +8,7 @@ const withSidebar = new URLSearchParams(location.search).get('sidebar') !== '0'
 const localEnabled = new URLSearchParams(location.search).get('local') !== '0'
 const connecting = new URLSearchParams(location.search).get('connecting') === '1', resizes: any[] = []
 const legacyTab = new URLSearchParams(location.search).get('legacy') === '1', calls = new Map<string, number>()
+const largeTree = new URLSearchParams(location.search).get('tree') === 'large'
 let tab: any, open = false, activeType = 'zterm'
 let openedTab: any, titleUpdates = 0
 const notify = () => listeners.forEach((listener) => listener())
@@ -17,6 +18,7 @@ const state: any = { terminals: [{ id: 'terminal-01', generation: 1, target, sta
 w.__ztermFixture = { resizes, snapshot: () => ({ terminals: state.terminals.map((t: any) => ({ id: t.id, source: t.target.source })), binding: state.binding }), setOutput: (text: string) => { output = text; seq++ }, finishConnect: () => { state.terminals[0].state = 'ready'; state.terminals[0].agentReady = true } }
 const catalog: any = { hosts: Array.from({ length: 8 }, (_, i) => ({ id: `host-${i}`, label: i < 3 ? `应用服务 0${i + 1}` : i < 5 ? `数据库 0${i - 2}` : `缓存节点 0${i - 4}`, kind: 'ssh', host: `192.0.2.${21 + i}`, port: 22, username: 'operator', authType: 'password', credentialRef: `DSH_ZTERM_TEST_${i}`, folderId: i < 3 ? 'apps' : undefined })), folders: [{ id: 'apps', label: '应用服务' }], jumpservers: [{ id: 'jump-1', label: '测试堡垒机', baseUrl: 'https://jump.example.invalid', authMode: 'token', credentialRef: 'DSH_ZTERM_TEST_JUMP', verifyTls: true }], total: 8, revision: 1,
   credentials: [], defaultCredentialId: '', allowLocalTerminal: localEnabled, allowExternalTargets: false, defaultPanelWidth: 60, maxSessions: 12, maxWriteCalls: 100, commandTimeoutMs: 30000, credentialsConfigured: {} }
+if (largeTree) catalog.folders.push(...Array.from({ length: 30 }, (_, i) => ({ id: `folder-${i}`, label: `测试文件夹 ${i + 1}` })))
 const ctx: any = { effect: (body: any) => body(), inject: (names: string[], body: any) => { if (!names.includes('betterSidebar') || withSidebar) return body(ctx) }, slots: { inject: (_name: any, body: any) => body(), register: (descriptor: any, component: any) => { slots.set(descriptor.name, component); return () => {} } },
   betterSidebar: withSidebar ? { registerTab: (descriptor: any) => { tab = descriptor; return () => {} }, openTab: (seed: any) => { openedTab ??= { id: 'fixture-tab', title: legacyTab ? '终端工作台' : seed.title }; open = true; activeType = 'zterm'; notify() },
     updateTab: (id: string, patch: any) => { if (openedTab?.id === id) { openedTab = { ...openedTab, ...patch }; titleUpdates++; notify() } } } : undefined,
@@ -45,12 +47,16 @@ const ctx: any = { effect: (body: any) => body(), inject: (names: string[], body
       catalog.credentials = [...catalog.credentials.filter((c: any) => c.id !== credential.id), credential]; revision++; value = { id: credential.id }
     }
     else if (method === 'folder/save') { const folder = { ...payload.folder, id: payload.folder.id ?? `folder-${Date.now()}` }; catalog.folders = [...catalog.folders.filter((f: any) => f.id !== folder.id), folder]; revision++; value = { id: folder.id } }
+    else if (method === 'folder/delete') {
+      if (catalog.folders.some((f: any) => f.parentId === payload.id) || catalog.hosts.some((h: any) => h.folderId === payload.id)) throw new Error('请先移出主机和子文件夹')
+      catalog.folders = catalog.folders.filter((f: any) => f.id !== payload.id); revision++; value = { deleted: true }
+    }
     else if (method === 'jump/save') { const profile = { ...payload.profile, id: payload.profile.id ?? `jump-${Date.now()}` }; catalog.jumpservers = [...catalog.jumpservers.filter((p: any) => p.id !== profile.id), profile]; revision++; value = { id: profile.id } }
     else if (method === 'config') { Object.assign(catalog, payload.patch); state.capabilities.local = catalog.allowLocalTerminal; revision++ }
     else if (method === 'results') value = state.operations
     else if (method === 'saved-workspace') value = []
     else if (method === 'terminal/export') value = output
-    else if (method === 'jump/query') value = payload.operation === 'nodes' ? { nodes: [{ nodeId: 'n', name: '测试资产', assetCount: 2 }] } : payload.operation === 'accounts' ? { accounts: [{ accountId: 'a', name: '运维账号', username: 'operator', canConnect: true }] } : { assets: [{ assetId: 'a1', name: '测试应用主机', address: '192.0.2.31', platform: 'Linux' }], total: 1, hasMore: false }
+    else if (method === 'jump/query') value = payload.operation === 'nodes' ? { nodes: largeTree ? Array.from({ length: 30 }, (_, i) => ({ nodeId: `node-${i}`, key: `1:${i}`, name: `测试资产组 ${i + 1}`, hasChildren: false, assetCount: 24 })) : [{ nodeId: 'n', name: '测试资产', assetCount: 2 }] } : payload.operation === 'accounts' ? { accounts: [{ accountId: 'a', name: '运维账号', username: 'operator', canConnect: true }] } : { assets: largeTree ? Array.from({ length: 24 }, (_, i) => ({ assetId: `asset-${i}`, name: `测试应用主机 ${i + 1}`, address: `192.0.2.${31 + i}`, platform: 'Linux' })) : [{ assetId: 'a1', name: '测试应用主机', address: '192.0.2.31', platform: 'Linux' }], total: largeTree ? 24 : 1, hasMore: false }
     return { ok: true, value }
   } } } }
 w.__ModuleLoader__ = { load: (bundle: any) => { const plugin = bundle.factory((name: string) => name === 'react' ? React : name === 'react/jsx-runtime' ? jsx : {}); plugin.apply(ctx); render() } }
