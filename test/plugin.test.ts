@@ -250,6 +250,42 @@ describe('DSH 宿主接口', () => {
       expect((await f.call('credential/save', { credential: { id: saved.value.id, label: 'Default key', authType: 'password' }, content: 'fixture-password', revision: 4 })).ok).toBe(false)
     } finally { f.dispose() }
   })
+  it.each([false, true])('PKCS#8 命名凭证可保存并保留原文（加密：%s）', async (encrypted) => {
+    const f = setup(), passphrase = encrypted ? 'fixture-pkcs8-passphrase' : undefined
+    const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem', ...(passphrase ? { cipher: 'aes-256-cbc', passphrase } : {}) }, publicKeyEncoding: { type: 'spki', format: 'pem' } })
+    try {
+      const saved = await f.call('credential/save', { credential: { label: 'PKCS8 key', authType: 'key' }, content: privateKey, passphrase, revision: 1 })
+      expect(saved.ok).toBe(true)
+      const credential = f.plugin.config().credentials[0]
+      expect(f.credentials.get(credential.credentialRef!)).toBe(privateKey)
+      expect((await f.call('credential/save', { credential: { ...credential, label: 'Renamed PKCS8 key' }, content: '', revision: 2 })).ok).toBe(true)
+      const catalog = await f.call('catalog')
+      expect(JSON.stringify([saved, catalog])).not.toContain(JSON.stringify(privateKey).slice(1, -1))
+      expect(JSON.stringify([saved, catalog])).not.toContain('PRIVATE KEY')
+      if (passphrase) {
+        expect(JSON.stringify([saved, catalog])).not.toContain(passphrase)
+        expect(await f.call('credential/save', { credential, content: '', passphrase: 'fixture-wrong-passphrase', revision: 3 })).toMatchObject({ ok: false, error: { code: 'invalid_private_key' } })
+        expect(await f.call('credential/save', { credential, content: '', clearPassphrase: true, revision: 3 })).toMatchObject({ ok: false, error: { code: 'invalid_private_key' } })
+        expect(f.credentials.size).toBe(2)
+      }
+      expect(f.credentials.get(credential.credentialRef!)).toBe(privateKey)
+    } finally { f.dispose() }
+  })
+  it('加密 PKCS#8 缺少或使用错误口令时拒绝保存且不遗留秘密', async () => {
+    const f = setup()
+    const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem', cipher: 'aes-256-cbc', passphrase: 'fixture-pkcs8-passphrase' }, publicKeyEncoding: { type: 'spki', format: 'pem' } })
+    try {
+      for (const passphrase of [undefined, 'fixture-wrong-passphrase']) {
+        const result = await f.call('credential/save', { credential: { label: 'Bad PKCS8 key', authType: 'key' }, content: privateKey, passphrase, revision: 1 })
+        expect(result).toMatchObject({ ok: false, error: { code: 'invalid_private_key' } })
+        expect(JSON.stringify(result)).not.toContain(JSON.stringify(privateKey).slice(1, -1))
+        expect(JSON.stringify(result)).not.toContain('PRIVATE KEY')
+        expect(JSON.stringify(result)).not.toContain('fixture-wrong-passphrase')
+      }
+      expect(f.credentials.size).toBe(0)
+      expect(f.plugin.config().credentials).toEqual([])
+    } finally { f.dispose() }
+  })
   it('宿主文件凭证保存一次路径；未知引用、默认密码和无效私钥被拒绝', async () => {
     const f = setup()
     try {

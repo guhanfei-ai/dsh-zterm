@@ -706,11 +706,10 @@ export async function fetchJumpserverNodeAssets(
 }
 
 /**
- * 按资产读取授权账号列表
+ * 按资产读取当前用户的授权账号列表
  *
- * 两步链路：
- *  1. GET /api/v1/users/profile/ → 获取当前用户 id
- *  2. GET /api/v1/perms/users/{user_id}/assets/{asset_id}/accounts/ → 拉取账号
+ * 直接请求 GET /api/v1/perms/users/self/assets/{asset_id}/accounts/，无需先查 profile。
+ * 显式 user id 的端点要求管理员权限，即使该 id 就是当前用户也不能代替 self。
  *
  * 只读账号，不创建连接令牌。
  */
@@ -719,56 +718,19 @@ export async function fetchJumpserverAccounts(
   assetId: string
 ): Promise<JumpserverAccountsResult> {
   const normalizedBase = normalizeJumpserverBaseUrl(params.baseUrl)
+  const accountsPath = `/api/v1/perms/users/self/assets/${assetId}/accounts/`
+  const accountsDate = rfc1123Date()
+  const accountsAuth = buildAuthHeader('GET', accountsPath, accountsDate, params)
 
-  // ===== 第一步：获取当前用户信息 =====
-  const profilePath = '/api/v1/users/profile/'
-  const profileDate = rfc1123Date()
-  const profileAuth = buildAuthHeader('GET', profilePath, profileDate, params)
-
-  if (profileAuth === null) {
+  if (accountsAuth === null) {
     return { success: false, accounts: [], error: '缺少凭据，请先完善配置' }
   }
 
-  const profileHeaders = buildJumpserverHeaders(profileDate, {
-    'Authorization': profileAuth
+  const accountsHeaders = buildJumpserverHeaders(accountsDate, {
+    'Authorization': accountsAuth
   })
 
   try {
-    const { statusCode: profileCode, body: profileBody } = await makeRequest(
-      normalizedBase,
-      { method: 'GET', path: profilePath, headers: profileHeaders, timeout: 15000 },
-      params.verifyTls
-    )
-
-    if (profileCode < 200 || profileCode >= 300) {
-      return { success: false, accounts: [], error: translateJumpserverHttpStatus(profileCode, profileBody, '用户信息') }
-    }
-
-    let profile: Record<string, unknown>
-    try {
-      profile = JSON.parse(profileBody) as Record<string, unknown>
-    } catch {
-      return { success: false, accounts: [], error: '服务器返回了无法解析的响应' }
-    }
-
-    const userId = String(profile.id || '')
-    if (!userId) {
-      return { success: false, accounts: [], error: '无法获取当前用户 ID' }
-    }
-
-    // ===== 第二步：拉取该资产下的授权账号 =====
-    const accountsPath = `/api/v1/perms/users/${userId}/assets/${assetId}/accounts/`
-    const accountsDate = rfc1123Date()
-    const accountsAuth = buildAuthHeader('GET', accountsPath, accountsDate, params)
-
-    if (accountsAuth === null) {
-      return { success: false, accounts: [], error: '缺少凭据，请先完善配置' }
-    }
-
-    const accountsHeaders = buildJumpserverHeaders(accountsDate, {
-      'Authorization': accountsAuth
-    })
-
     const { statusCode: accountsCode, body: accountsBody } = await makeRequest(
       normalizedBase,
       { method: 'GET', path: accountsPath, headers: accountsHeaders, timeout: 15000 },

@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { Server, utils } from 'ssh2'
-import { generateKeyPairSync } from 'node:crypto'
+import { createPublicKey, generateKeyPairSync, verify } from 'node:crypto'
 import { mkdtempSync, rmSync, readFileSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -60,6 +60,67 @@ describe('测试拥有的真实 SSH 与 PTY 通道', () => {
       await new Promise<void>((resolve) => server.close(() => resolve())); rmSync(dir, { recursive: true, force: true })
     }
   }, 10000)
+  it.each([
+    { name: 'RSA', generate: () => generateKeyPairSync('rsa', { modulusLength: 2048 }), hash: 'sha256' },
+    { name: 'ECDSA', generate: () => generateKeyPairSync('ec', { namedCurve: 'prime256v1' }), hash: 'sha256' },
+    { name: 'Ed25519', generate: () => generateKeyPairSync('ed25519'), hash: null },
+  ].flatMap((algorithm) => [false, true].map((encrypted) => ({ ...algorithm, encrypted }))))('$name PKCS#8（加密：$encrypted）经命名凭证、旧主机和宿主文件完成真实 SSH 认证', async ({ generate, hash, encrypted }) => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-zterm-pkcs8-')), clients = new Set<any>(), authenticated: string[] = []
+    const { privateKey, publicKey } = generate(), passphrase = encrypted ? 'fixture-pkcs8-passphrase' : undefined
+    const pem = privateKey.export({ type: 'pkcs8', format: 'pem', ...(passphrase ? { cipher: 'aes-256-cbc', passphrase } : {}) }).toString()
+    const path = join(dir, 'fixture-key.pem'); writeFileSync(path, pem, { mode: 0o600 })
+    const publicDer = publicKey.export({ type: 'spki', format: 'der' })
+    const server = new Server({ hostKeys: [utils.generateKeyPairSync('ed25519').private] }, (client) => {
+      clients.add(client); client.on('error', () => {}); client.on('close', () => clients.delete(client))
+      client.on('authentication', (request) => {
+        if (request.method !== 'publickey' || request.username !== 'operator') return request.reject()
+        const offered = utils.parseKey(request.key.data)
+        if (offered instanceof Error || Array.isArray(offered) || !createPublicKey(offered.getPublicPEM()).export({ type: 'spki', format: 'der' }).equals(publicDer)) return request.reject()
+        if (request.signature && !verify(request.hashAlgo ?? hash, request.blob!, publicKey, request.signature)) return request.reject()
+        if (request.signature) authenticated.push(request.username)
+        request.accept()
+      })
+      client.on('ready', () => client.on('session', (accept) => {
+        const session = accept(); session.on('pty', (ok) => ok?.())
+        session.on('shell', (ok) => { const channel = ok(); channel.write('fixture PKCS8 shell ready\r\n') })
+      }))
+    })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve)); const port = (server.address() as { port: number }).port
+    const passphraseRef = passphrase ? 'DSH_ZTERM_PKCS8_PHRASE' : undefined
+    const base = { kind: 'ssh' as const, label: 'Fixture PKCS8 host', host: '127.0.0.1', port, username: 'operator' }
+    const config: Config = { ...DEFAULT_CONFIG,
+      credentials: [{ id: 'named-key', label: 'Fixture PKCS8 key', authType: 'key', credentialRef: 'DSH_ZTERM_PKCS8', passphraseRef }],
+      hosts: [{ ...base, id: 'named', authType: 'key', credentialId: 'named-key' }, { ...base, id: 'legacy', authType: 'key', credentialRef: 'DSH_ZTERM_PKCS8', passphraseRef }, { ...base, id: 'file', authType: 'key-file', privateKeyPath: path, passphraseRef }] }
+    const runtime = new ZtermRuntime({ config: () => config, credentials: { resolve: async (ref) => ({ value: ref === 'DSH_ZTERM_PKCS8' ? pem : passphrase! }) }, store: new RecordStore(join(dir, 'data')), sessionCwd: () => dir })
+    try {
+      for (const targetId of ['named', 'legacy', 'file']) {
+        const terminal = await runtime.connect('pkcs8-session', { targetId })
+        const view = () => runtime.workspace('pkcs8-session').terminals.find((entry) => entry.id === terminal.id)!
+        await viWait(() => Boolean(view().trust) || view().state === 'error' || view().state === 'ready')
+        if (view().trust) runtime.trust('pkcs8-session', terminal.id, terminal.generation, view().trust!.requestId, 'trust-always')
+        await viWait(() => view().state === 'ready' || view().state === 'error')
+        expect(view().state, view().error).toBe('ready')
+        expect(runtime.bind('pkcs8-session', terminal.id, terminal.generation).mode).toBe('read')
+        if (targetId === 'named') {
+          runtime.setMode('pkcs8-session', terminal.id, terminal.generation, 'readwrite')
+          await runtime.reconnect('pkcs8-session', terminal.id)
+          await viWait(() => view().state === 'ready' || view().state === 'error')
+          expect(view().state, view().error).toBe('ready')
+          expect(runtime.bind('pkcs8-session', terminal.id, terminal.generation + 1).mode).toBe('read')
+        }
+        const visible = JSON.stringify([runtime.poll('pkcs8-session', -1), runtime.records('pkcs8-session'), config])
+        expect(visible).not.toContain(JSON.stringify(pem).slice(1, -1))
+        expect(visible).not.toContain('PRIVATE KEY')
+        if (passphrase) expect(visible).not.toContain(passphrase)
+        runtime.disconnect('pkcs8-session', terminal.id, true)
+      }
+      expect(authenticated).toEqual(['operator', 'operator', 'operator', 'operator'])
+      expect(readFileSync(path, 'utf8')).toBe(pem)
+    } finally {
+      runtime.dispose(); for (const client of clients) client.end()
+      await new Promise<void>((resolve) => server.close(() => resolve())); rmSync(dir, { recursive: true, force: true })
+    }
+  }, 15000)
   it('指纹确认、真实读取、默认拒绝写入、一揽子写入与实际记录', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'dsh-zterm-ssh-')), children = new Set<LocalPtySession>(), clients = new Set<any>(), sizes: Array<{ cols: number; rows: number }> = []
     const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs1', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } })

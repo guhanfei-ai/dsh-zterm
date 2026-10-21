@@ -1,7 +1,7 @@
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import ssh2 from 'ssh2'
+import { normalizeSshPrivateKey } from './core/sshPrivateKey'
 import { ConfigSchema, DEFAULT_CONFIG, validateConfig, validateHost, validateJump, validateCredential, credentialRef, id, plain } from './host/config'
 import { RecordStore } from './host/store'
 import { ZtermRuntime, ZtermError } from './host/runtime'
@@ -134,8 +134,8 @@ export function createPlugin(ctx: any, entryConfig: any = {}, deps: { dataRoot?:
       if (raw.authType === 'key' && (content || phrase || payload.clearPassphrase === true)) {
         const key = content || (await ctx.credentials.resolve(previous?.credentialRef))?.value
         const passphrase = payload.clearPassphrase === true ? undefined : phrase || (next.passphraseRef ? (await ctx.credentials.resolve(next.passphraseRef))?.value : undefined)
-        const parsed = key ? ssh2.utils.parseKey(key, passphrase) : undefined
-        if (!parsed || parsed instanceof Error || !(Array.isArray(parsed) ? parsed : [parsed]).some((k) => k.getPrivatePEM())) throw new ZtermError('invalid_private_key', '私钥内容无效或口令不正确，请检查文件和口令')
+        try { normalizeSshPrivateKey(key ?? '', passphrase) }
+        catch { throw new ZtermError('invalid_private_key', '私钥内容无效或口令不正确，请检查文件和口令') }
       }
       const credential = validateCredential(next)
       await saveWithCredentials({ credentials: [...config().credentials.filter((c) => c.id !== credentialId), credential] }, payload.revision, secrets)

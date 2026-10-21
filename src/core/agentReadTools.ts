@@ -66,7 +66,7 @@ const definitions = [
   {
     name: 'read_bound_file',
     label: '读取文件',
-    description: '读取绑定目标的文本文件或已支持的 /proc 信息。开头/末尾窗口最多 64 KiB（另读一个边界字节），文本输出最多 7000 字节。返回实际行区间、截断原因和可用的 nextStartLine。只有完整观察文件时 totalLines 才有值；末尾窗口的绝对行号可能未知。超出文件与超出窗口分别报错。拒绝设备、管道和凭据文件。',
+    description: '读取绑定目标的文本文件或已支持的 /proc 信息。开头/末尾返回窗口最多 64 KiB（另读一个边界字节），末尾读取另检查前 64 KiB 的凭据类型，文本输出最多 7000 字节。返回实际行区间、截断原因和可用的 nextStartLine。只有完整观察文件时 totalLines 才有值；末尾窗口的绝对行号可能未知。超出文件与超出窗口分别报错。拒绝设备、管道、凭据路径及样本中识别出的常见凭据内容。',
     parameters: Type.Object({
       path: pathParam,
       start_line: Type.Optional(Type.Integer({ minimum: 1, maximum: 10000, default: 1 })),
@@ -77,7 +77,7 @@ const definitions = [
   {
     name: 'search_bound_text',
     label: '搜索文本',
-    description: '在已绑定目标的一个文本文件或目录直接子文件中做字面关键词搜索，不执行正则或脚本，不递归。目录最多检查 100 个文件，每个文件最多检查前 64 KiB；跳过符号链接和常见凭据文件。',
+    description: '在已绑定目标的一个文本文件或目录直接子文件中做字面关键词搜索，不执行正则或脚本，不递归。目录最多检查 100 个文件，每个文件最多检查前 64 KiB；单文件识别到常见凭据内容时拒绝，目录搜索跳过符号链接、凭据路径及识别到的凭据内容并报告数量。',
     parameters: Type.Object({
       path: pathParam,
       query: Type.String({ minLength: 1, maxLength: 256 }),
@@ -148,14 +148,81 @@ function boolean(value: unknown, fallback: boolean): boolean {
   return value
 }
 
+/** 凭据封禁唯一事实源：JS 参数校验与远端 realpath 复查共用，防止两层清单漂移。 */
+const credentialDirectories = [
+  '.ssh', '.aws', '.kube', '.docker', '.gnupg', '.azure', '.gcloud', '.config/gcloud', '.aliyun',
+]
+const credentialBasenames = ['.env', 'credentials', 'secrets', '.netrc', '.pgpass', '.git-credentials', '.htpasswd', 'kubeconfig']
+const credentialNameSuffixes = ['.kubeconfig']
+const credentialExtensions = ['pem', 'key', 'p12', 'pfx', 'ppk', 'jks', 'kdbx']
+const sshKeyBasenames = ['id_rsa', 'id_dsa', 'id_ecdsa', 'id_ed25519']
+const CREDENTIAL_CONTENT_EXIT = 77
+const CREDENTIAL_CONTENT_MESSAGE = '检测到凭据文件内容，读取被拒绝。'
+
+/** 在远端的有界样本上识别常见凭据类型；先检查再输出，秘密不能进入终端流或操作记录。 */
+const credentialContentAwk = String.raw`
+  function jsonObjectField(value, field, start, pos, depth, quoted, escaped, ch) {
+    if (!match(value, "\"" field "\"[[:space:]]*:[[:space:]]*[{]")) return "";
+    start = RSTART + RLENGTH - 1;
+    for (pos = start; pos <= length(value); pos++) {
+      ch = substr(value, pos, 1);
+      if (quoted) {
+        if (escaped) escaped = 0;
+        else if (ch == "\\") escaped = 1;
+        else if (ch == "\"") quoted = 0;
+      } else if (ch == "\"") quoted = 1;
+      else if (ch == "{") depth++;
+      else if (ch == "}") { depth--; if (depth == 0) return substr(value, start, pos - start + 1); }
+    }
+    return substr(value, start);
+  }
+  function credentialContent(value, lower, root, auths) {
+    lower = tolower(value);
+    sub(/^\357\273\277/, "", lower);
+    if (lower ~ /(^|\n)[[:blank:]]*-----[[:blank:]]*(begin|end)[[:blank:]]+((rsa|ec|dsa|openssh|encrypted)[[:blank:]]+)?private key[[:blank:]]*-----[[:blank:]]*(\r?\n|$)/) return 1;
+    if (lower ~ /(^|\n)[[:blank:]]*-----[[:blank:]]*(begin|end)[[:blank:]]+pgp private key block[[:blank:]]*-----[[:blank:]]*(\r?\n|$)/) return 1;
+    if (lower ~ /(^|\n)[[:blank:]]*----[[:blank:]]*(begin|end)[[:blank:]]+ssh2[[:blank:]]+(encrypted[[:blank:]]+)?private key[[:blank:]]*----[[:blank:]]*(\r?\n|$)/) return 1;
+    if (lower ~ /(^|\n)[[:blank:]]*putty-user-key-file-[123]:/) return 1;
+    if (lower ~ /(^|\n)[[:blank:]]*(export[[:blank:]]+)?aws_(access_key_id|secret_access_key|session_token)[[:blank:]]*=[[:blank:]]*("[^"]|'[^']|[^[:space:]"'#;])/) return 1;
+    root = lower;
+    sub(/^[[:space:]]+/, "", root);
+    while (root ~ /^(#[^\n]*|---[[:blank:]]*(#[^\n]*)?)\r?\n/) { sub(/^[^\n]*\n/, "", root); sub(/^[[:space:]]+/, "", root); }
+    if (root ~ /^\{/) {
+      if (root ~ /"aws_(access_key_id|secret_access_key|session_token)"[[:space:]]*:[[:space:]]*"[^"]/) return 1;
+      if (root ~ /"(private_key|privatekey)"[[:space:]]*:[[:space:]]*"-----begin[[:blank:]]+((rsa|ec|dsa|openssh|encrypted)[[:blank:]]+)?private key-----(\\r)?\\n[a-z0-9+]/) return 1;
+      auths = jsonObjectField(root, "auths");
+      if (auths ~ /"(auth|identitytoken)"[[:space:]]*:[[:space:]]*"[^"]/) return 1;
+      if (root ~ /"kind"[[:space:]]*:[[:space:]]*"config"/ && root ~ /"(users|clusters)"[[:space:]]*:[[:space:]]*\[/) return 1;
+      if (root ~ /"type"[[:space:]]*:[[:space:]]*"(service_account|authorized_user)"/ && root ~ /"(private_key|refresh_token|client_secret)"[[:space:]]*:[[:space:]]*"[^"]/) return 1;
+    }
+    if (root ~ /^["']?(apiversion|kind|users|clusters|contexts|current-context|preferences|extensions)["']?[[:blank:]]*:/ && lower ~ /(^|\n)["']?kind["']?[[:blank:]]*:[[:blank:]]*["']?config["']?[[:blank:]]*(#[^\n]*)?(\r?\n|$)/ && lower ~ /(^|\n)["']?(users|clusters)["']?[[:blank:]]*:[[:blank:]]*(\[|(#[^\n]*)?\r?\n([[:blank:]]*(#[^\n]*)?\r?\n)*[[:blank:]]*-[[:space:]])/) return 1;
+    return 0;
+  }`
+const denyCredentialContentAwk = `if (credentialContent(sample)) { printf "%s", "${CREDENTIAL_CONTENT_MESSAGE}"; exit ${CREDENTIAL_CONTENT_EXIT}; }`
+
+const escaped = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+const globCharClass = (character: string) => {
+  const lower = character.toLowerCase(), upper = character.toUpperCase()
+  return lower === upper ? character : `[${lower}${upper}]`
+}
 /** 路径解析后的远端目标还会检查同一边界，避免符号链接绕过。 */
 const deniedPathCases = [
   '/dev|/dev/*|/sys|/sys/*',
   '/etc/shadow|/etc/gshadow|/etc/shadow-*|/etc/gshadow-*',
-  '*/.ssh|*/.ssh/*|*/.aws|*/.aws/*|*/.kube|*/.kube/*',
-  '*/.env|*/.env.*|*/credentials|*/credentials.*|*/secrets|*/secrets.*|*.[pP][eE][mM]|*.[kK][eE][yY]',
+  ...credentialDirectories.flatMap((directory) => [`*/${directory}`, `*/${directory}/*`]),
+  ...credentialBasenames.flatMap((name) => [`*/${name}`, `*/${name}.*`]),
+  ...credentialNameSuffixes.map((suffix) => `*${suffix}`),
+  ...credentialExtensions.map((extension) => '*.' + [...extension].map(globCharClass).join('')),
+  ...sshKeyBasenames.map((name) => `*/${name}`),
 ].join('|')
 const allowedProcCases = '/proc/meminfo|/proc/loadavg|/proc/uptime|/proc/cpuinfo|/proc/version|/proc/net/tcp|/proc/net/tcp6|/proc/net/udp|/proc/net/udp6'
+const credentialPatterns = [
+  new RegExp(`(?:^|/)(${credentialDirectories.map(escaped).join('|')})(?:/|$)`),
+  new RegExp(`/(?:${credentialBasenames.map(escaped).join('|')})(?:\\..*)?$`),
+  new RegExp(`(?:${credentialNameSuffixes.map(escaped).join('|')})$`),
+  new RegExp(`\\.(?:${credentialExtensions.join('|')})$`, 'i'),
+  new RegExp(`/(?:${sshKeyBasenames.join('|')})$`),
+]
 
 function filePath(value: unknown): string {
   const path = text(value, 'path', 2048)
@@ -163,9 +230,7 @@ function filePath(value: unknown): string {
   const normalized = posix.normalize(path)
   if (/^\/(?:dev|sys)(?:\/|$)/.test(normalized)
     || /^\/etc\/(?:shadow|gshadow)(?:-|$)/.test(normalized)
-    || /\/\.(?:ssh|aws|kube)(?:\/|$)/.test(normalized)
-    || /\/(?:\.env(?:\..*)?|credentials(?:\..*)?|secrets(?:\..*)?)$/.test(normalized)
-    || /\.(?:pem|key)$/i.test(normalized)) {
+    || credentialPatterns.some((pattern) => pattern.test(normalized))) {
     throw new ReadParameterError('path_denied', '该路径属于设备或凭据范围，内置读工具不开放')
   }
   return normalized
@@ -226,9 +291,10 @@ function fileSample(reader: 'head' | 'tail', pathVariable: 'p' | 'f', bytes: num
     + '| LC_ALL=C command od -An -v -tu1 | '
 }
 
-/** 样本通过 od 保留 NUL；完整检查样本后才返回字面命中及源读取状态。 */
-function checkedTextSearch(matches: number): string {
-  const script = String.raw`
+/** 在同一份样本上先分类再输出；NUL 保留为标志，不能经 Shell 变量静默丢失。 */
+function inspectedTextSample(action: string): string {
+  return String.raw`
+    ${credentialContentAwk}
     BEGIN { for (i = 1; i < 256; i++) characters[i] = sprintf("%c", i); }
     {
       for (i = 1; i <= NF; i++) {
@@ -242,15 +308,34 @@ function checkedTextSearch(matches: number): string {
       sample = sample chunk;
       trailer = substr(sample, length(sample) > 48 ? length(sample) - 47 : 1);
       ${sourceExitAwk}
-      if (ec != 0) printf "文本搜索读取失败（源退出码 %d）。\n", ec;
-      else if (!binary) {
-        lines = split(substr(sample, 1, size), rows, "\n");
-        for (i = 1; i <= lines && count < limit; i++) {
-          if (index(rows[i], ENVIRON["ZTERM_READ_QUERY"])) { print i ":" rows[i]; count++; }
-        }
-      }
-      exit ec;
+      sample = substr(sample, 1, size);
+      ${action}
     }`.trim().replace(/\s*\n\s*/g, ' ')
+}
+
+/** 尾窗可能看不到文件头；额外有界检查前缀，只输出固定失败文字，不返回样本。 */
+function credentialPrefixGuard(): string {
+  const script = inspectedTextSample(String.raw`
+    if (ec != 0) { printf "凭据类型检查读取失败（源退出码 %d）。\n", ec; exit ec; }
+    ${denyCredentialContentAwk}
+    exit 0;`)
+  return fileSample('head', 'p', SOURCE_BYTES)
+    + 'LC_ALL=C command awk ' + quote(script)
+    + '; zterm_check_ec=$?; if [ "$zterm_check_ec" -ne 0 ]; then exit "$zterm_check_ec"; fi; '
+}
+
+/** 样本通过 od 保留 NUL；完整检查样本后才返回字面命中及源读取状态。 */
+function checkedTextSearch(matches: number): string {
+  const script = inspectedTextSample(String.raw`
+    if (ec != 0) { printf "文本搜索读取失败（源退出码 %d）。\n", ec; exit ec; }
+    ${denyCredentialContentAwk}
+    if (!binary) {
+      lines = split(sample, rows, "\n");
+      for (i = 1; i <= lines && count < limit; i++) {
+        if (index(rows[i], ENVIRON["ZTERM_READ_QUERY"])) { print i ":" rows[i]; count++; }
+      }
+    }
+    exit 0;`)
   return fileSample('head', 'f', SOURCE_BYTES)
     + 'ZTERM_READ_QUERY="$q" LC_ALL=C command awk -v limit=' + matches + ' ' + quote(script)
 }
@@ -258,6 +343,7 @@ function checkedTextSearch(matches: number): string {
 /** od 保留 NUL 和换行；只在有界样本中统计行数，不扫描完整大文件、不写远端临时文件。 */
 function fileWindowCommand(start: number, lines: number, fromEnd: boolean): string {
   const script = String.raw`
+    ${credentialContentAwk}
     function prefix(s, cap) {
       while (cap > 0 && substr(s, cap + 1, 1) ~ /[\200-\277]/) cap--;
       return substr(s, 1, cap);
@@ -271,6 +357,12 @@ function fileWindowCommand(start: number, lines: number, fromEnd: boolean): stri
     END {
       for (i = (size > 48 ? size - 48 : 1); i <= size; i++) trailer = trailer sprintf("%c", bytes[i]);
       ${sourceExitAwk}
+      for (i = 1; i <= size; i++) {
+        chunk = chunk (bytes[i] == 0 ? " " : sprintf("%c", bytes[i]));
+        if (i % 1024 == 0) { sample = sample chunk; chunk = ""; }
+      }
+      sample = sample chunk;
+      if (ec == 0) { ${denyCredentialContentAwk} }
       limited = size > sourceLimit; observed = limited ? sourceLimit : size;
       lo = tail && limited ? size - sourceLimit + 1 : 1;
       hi = tail ? size : observed;
@@ -320,6 +412,7 @@ function fileWindowCommand(start: number, lines: number, fromEnd: boolean): stri
     }`.trim().replace(/\s*\n\s*/g, ' ')
   const reader = fromEnd ? 'tail' : 'head'
   return 'if ! command -v od >/dev/null 2>&1 || ! command -v awk >/dev/null 2>&1; then printf "%s\\n" "文件查询能力不可用：需要 od 和 awk"; exit 127; fi; '
+    + (fromEnd ? credentialPrefixGuard() : '')
     + fileSample(reader, 'p', SOURCE_BYTES + 1) + 'LC_ALL=C command awk '
     + '-v sourceLimit=' + SOURCE_BYTES + ' -v outputLimit=' + FILE_OUTPUT_BYTES
     + ' -v startLine=' + start + ' -v maxLines=' + lines + ' -v tail=' + Number(fromEnd) + ' ' + quote(script)
@@ -357,26 +450,27 @@ export function prepareBuiltinRead(name: string, params: Record<string, unknown>
       command = pathPrelude(path)
         + 'if [ ! -f "$p" ] || [ ! -r "$p" ]; then printf "%s\\n" "路径不是可读普通文件"; exit 2; fi; '
         + fileWindowCommand(start, lines, fromEnd)
-      scope += fromEnd ? '，文件末尾窗口，最多 64 KiB' : '，文件开头 64 KiB 内的行窗口'
+      scope += fromEnd ? '，文件末尾窗口，最多 64 KiB；另检查前 64 KiB 的凭据类型' : '，文件开头 64 KiB 内的行窗口'
       break
     }
     case 'search_bound_text': {
       const path = filePath(params.path)
       const query = text(params.query, 'query', 256)
       const matches = integer(params.max_matches, 30, 1, 100)
-      command = pathPrelude(path) + 'q=' + quote(query) + '; count=0; unread=0; '
+      command = pathPrelude(path) + 'q=' + quote(query) + '; count=0; unread=0; credentials=0; directory=0; '
         + 'if [ ! -r "$p" ] || { [ -d "$p" ] && [ ! -x "$p" ]; }; then printf "%s\\n" "搜索路径不可读或目录不可访问"; exit 2; fi; '
         + 'if ! command -v od >/dev/null 2>&1 || ! command -v awk >/dev/null 2>&1; then printf "%s\\n" "文本搜索能力不可用：需要 od 和 awk"; exit 127; fi; '
-        + 'if [ -f "$p" ]; then set -- "$p"; elif [ -d "$p" ]; then set -- "$p"/* "$p"/.[!.]* "$p"/..?*'
+        + 'if [ -f "$p" ]; then set -- "$p"; elif [ -d "$p" ]; then directory=1; set -- "$p"/* "$p"/.[!.]* "$p"/..?*'
         + '; else printf "%s\\n" "路径不是普通文件或目录"; exit 2; fi; '
         + 'for f do [ -f "$f" ] && [ ! -L "$f" ] || continue; '
         + 'case "$f" in ' + deniedPathCases + ') continue;; esac; '
         + 'if [ ! -r "$f" ]; then unread=$((unread+1)); continue; fi; '
         + '[ "$count" -lt 100 ] || break; count=$((count+1)); '
         + 'hits=$(' + checkedTextSearch(matches) + '); ec=$?; '
-        + 'if [ "$ec" -ne 0 ]; then printf "%s\\n" "$hits"; exit "$ec"; fi; '
+        + 'if [ "$ec" -eq ' + CREDENTIAL_CONTENT_EXIT + ' ] && [ "$hits" = ' + quote(CREDENTIAL_CONTENT_MESSAGE) + ' ] && [ "$directory" -eq 1 ]; then credentials=$((credentials+1)); continue; fi; '
+        + 'if [ "$ec" -ne 0 ]; then printf "%s" "$hits"; exit "$ec"; fi; '
         + 'if [ -n "$hits" ]; then printf "\\nFILE %s\\n%s\\n" "$f" "$hits"; fi; '
-        + 'done; printf "\\n搜索范围：已检查 %s 个文件，跳过 %s 个不可读文件。\\n" "$count" "$unread"; exit 0'
+        + 'done; printf "\\n搜索范围：已检查 %s 个文件，跳过 %s 个不可读文件，跳过 %s 个凭据内容文件。\\n" "$count" "$unread" "$credentials"; exit 0'
       scope += '，非递归字面搜索，最多 100 个文件，每文件前 64 KiB'
       break
     }
@@ -570,6 +664,16 @@ export function createBuiltinReadTools(execute: ReadExecutor): ToolDefinition[] 
             { format: 'text', text: displayOutput }, { status: 'error', exitCode: result.details.fidelity === 'verified' ? result.details.exitCode : null,
               error, truncationReasons: result.details.truncationReasons }) }],
           details: { ...result.details, displayOutput, command: prepared?.label ?? definition.label },
+        }
+      }
+      if (result.details.exitCode === CREDENTIAL_CONTENT_EXIT && output.trim() === CREDENTIAL_CONTENT_MESSAGE) {
+        const error: ReadError = { code: 'credential_content_denied', phase: 'content', message: CREDENTIAL_CONTENT_MESSAGE }
+        return { ...result,
+          content: [{ type: 'text', text: readResultText(definition.name, prepared?.scope ?? '当前绑定目标',
+            { format: prepared?.fileWindow ? 'file' : 'text', text: CREDENTIAL_CONTENT_MESSAGE },
+            { status: 'error', exitCode: CREDENTIAL_CONTENT_EXIT, error }) }],
+          details: { ...result.details, output: undefined, command: prepared?.label ?? definition.label,
+            displayOutput: CREDENTIAL_CONTENT_MESSAGE, truncated: false, truncationReasons: [], readErrorCode: error.code },
         }
       }
       if (prepared?.fileWindow && (result.details.exitCode === 0 || output.startsWith('__ZTERM_FILE_V1__|'))) {

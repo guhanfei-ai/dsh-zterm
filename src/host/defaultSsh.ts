@@ -1,7 +1,7 @@
 import { open } from 'node:fs/promises'
 import { homedir, userInfo } from 'node:os'
 import { isAbsolute, join } from 'node:path'
-import ssh2 from 'ssh2'
+import { normalizeSshPrivateKey } from '../core/sshPrivateKey'
 import { checkCancelled, ZtermError } from './errors'
 
 export const DEFAULT_KEY_FILES = ['id_ed25519', 'id_rsa', 'id_ecdsa']
@@ -22,10 +22,8 @@ export async function readDefaultPrivateKey(configured: string, passphrase?: str
       if (!stat.isFile() || stat.size > 1024 * 1024) throw new ZtermError('invalid_private_key', '默认 SSH 私钥文件无效或过大')
       const value = await file.readFile({ encoding: 'utf8' }); checkCancelled(signal)
       if (Buffer.byteLength(value) > 1024 * 1024) throw new ZtermError('invalid_private_key', '默认 SSH 私钥文件过大')
-      const parsed = ssh2.utils.parseKey(value, passphrase)
-      if (parsed instanceof Error) throw new ZtermError('invalid_private_key', '默认 SSH 私钥无法解析；若文件已加密，请在该主机的编辑页面填写私钥口令')
-      const keys = Array.isArray(parsed) ? parsed : [parsed]
-      if (!keys.some((key) => key.getPrivatePEM())) throw new ZtermError('invalid_private_key', '默认 SSH 文件不是私钥')
+      try { normalizeSshPrivateKey(value, passphrase) }
+      catch { throw new ZtermError('invalid_private_key', '默认 SSH 私钥无法解析；请检查完整私钥和算法，若文件已加密，请填写正确的私钥口令') }
       return value
     } finally { await file.close() }
   }

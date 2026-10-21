@@ -1,5 +1,6 @@
 /** 移植自 zterm 0.4.1，MIT；来源见 THIRD_PARTY_NOTICES.md。 */
 import { TerminalOutputBuffer } from './terminalOutputBuffer'
+import { normalizeSshPrivateKey } from './sshPrivateKey'
 import ssh2 from 'ssh2'
 import type { Client, ConnectConfig, ClientChannel } from 'ssh2'
 import { EventEmitter } from 'events'
@@ -221,6 +222,8 @@ export class TerminalSession extends EventEmitter {
   }
 
   async connect(opts: SshConnectionOptions): Promise<void> {
+    // Validate/convert before allocating a client; failed keys must not initiate a connection.
+    const privateKey = opts.privateKey ? normalizeSshPrivateKey(opts.privateKey, opts.passphrase) : undefined
     return new Promise((resolve, reject) => {
       this.currentHost = { host: opts.host, port: opts.port || 22, username: opts.username }
       this.verifiedHostKey = undefined
@@ -242,8 +245,8 @@ export class TerminalSession extends EventEmitter {
       config.hostVerifier = (key: Buffer, verify: (allowed: boolean) => void) => this.verifyHostKey(opts, key, verify)
 
       if (opts.agent) config.agent = opts.agent
-      if (opts.privateKey) {
-        config.privateKey = opts.privateKey
+      if (privateKey) {
+        config.privateKey = privateKey
         if (opts.passphrase) config.passphrase = opts.passphrase
       } else if (opts.password) {
         config.password = opts.password

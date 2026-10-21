@@ -86,6 +86,14 @@ describe('默认 SSH 私钥只由宿主文件读取', () => {
     await expect(readDefaultPrivateKey('~/.ssh/missing', undefined, undefined, root)).rejects.toThrow('无法读取')
     await expect(readDefaultPrivateKey('', undefined, undefined, home())).rejects.toThrow('未找到')
   })
+  it.each([false, true])('PKCS#8 宿主文件可读取且保留原文（加密：%s）', async (encrypted) => {
+    const root = home(), passphrase = encrypted ? 'fixture-pkcs8-passphrase' : undefined
+    const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem', ...(passphrase ? { cipher: 'aes-256-cbc', passphrase } : {}) }, publicKeyEncoding: { type: 'spki', format: 'pem' } })
+    writeFileSync(join(root, '.ssh/id_rsa'), privateKey)
+    expect(await readDefaultPrivateKey('', passphrase, undefined, root)).toBe(privateKey)
+    expect(await readDefaultPrivateKey('~/.ssh/id_rsa', passphrase, undefined, root)).toBe(privateKey)
+    if (encrypted) for (const wrong of [undefined, 'fixture-wrong-passphrase']) await expect(readDefaultPrivateKey('', wrong, undefined, root)).rejects.toMatchObject({ code: 'invalid_private_key' })
+  })
   it('加密私钥需要口令，拒绝公钥和相对路径', async () => {
     const root = home(), pem = key('fixture-passphrase'); writeFileSync(join(root, '.ssh/id_rsa'), pem)
     await expect(readDefaultPrivateKey('', undefined, undefined, root)).rejects.toThrow('口令')
