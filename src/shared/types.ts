@@ -12,7 +12,7 @@ export interface JumpProfile {
 }
 export interface Config {
   hosts: HostTarget[]; folders: HostFolder[]; jumpservers: JumpProfile[]; credentials: SavedCredential[]; allowLocalTerminal: boolean
-  allowExternalTargets: boolean; defaultSshUsername: string; defaultPrivateKeyPath: string; defaultCredentialId: string
+  allowExternalTargets: boolean; temporarilyDisabled: boolean; defaultSshUsername: string; defaultPrivateKeyPath: string; defaultCredentialId: string
   defaultPanelWidth: number; maxSessions: number; maxWriteCalls: number; commandTimeoutMs: number
 }
 export interface AutomaticTarget { kind?: 'auto'; host: string; username?: string; port?: number; label?: string }

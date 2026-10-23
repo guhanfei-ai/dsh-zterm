@@ -9,21 +9,23 @@ const dirs: string[] = []
 afterEach(() => dirs.splice(0).forEach((dir) => rmSync(dir, { recursive: true, force: true })))
 function setup(initial: any = {}, credentialValues = new Map<string, string>(), deps: any = {}) {
   const root = mkdtempSync(join(tmpdir(), 'dsh-zterm-plugin-')); dirs.push(root)
-  let config: any = { ...DEFAULT_CONFIG, ...initial }, revision = 1, gate: any
-  const routes = new Map<string, any>()
+  const deferSettings = deps.deferSettings === true
+  let activateInject: (() => void) | undefined
+  let config: any = { ...DEFAULT_CONFIG, ...initial }, revision = 1, gate: any, toolProvider: any
+  const routes = new Map<string, any>(), listeners = new Map<string, Array<(...args: any[]) => any>>(), sections: any[] = []
   const registered: any[] = [], credentials = credentialValues, disposers: any[] = []
-  const ctx: any = { tools: { register: (tool: any) => registered.push(tool) }, systemPrompt: { section: () => {} },
+  const ctx: any = { tools: { register: (tool: any) => { registered.push(tool); return () => { const index = registered.indexOf(tool); if (index >= 0) registered.splice(index, 1) } } }, systemPrompt: { section: (section: any) => { sections.push(section); return () => {} }, tools: (provider: any) => { toolProvider = provider; return () => {} } },
     credentials: { resolve: async (ref: string) => credentials.has(ref) ? { value: credentials.get(ref) } : undefined, set: async (ref: string, value: string) => { credentials.set(ref, value) }, unset: async (ref: string) => { credentials.delete(ref) } },
     sessions: { get: (id: string) => id === 'session-1' ? { header: { cwd: root } } : undefined },
     settings: { describe: () => [{ ns: 'zterm', value: config, revision }], update: async (_ns: string, next: any, expected: number) => { if (expected !== revision) throw new Error('配置修订号已变化'); config = next; revision++ } },
     connection: { fetch: { register: (route: any) => { routes.set(route.path, route); return () => routes.delete(route.path) } }, rpc: { intercept: () => { throw new Error('共享拦截器不得被插件占用') } } },
-    inject: (_names: any, body: any) => body(ctx), on: (_name: string, body: any) => { gate = body }, effect: (body: any) => { const disposer = body(); disposers.push(disposer) } }
+    inject: (_names: any, body: any) => { if (deferSettings) { activateInject = () => body(ctx); return } body(ctx) }, on: (name: string, body: any) => { const list = listeners.get(name) ?? []; list.push(body); listeners.set(name, list); if (name === 'tools/pre-execute') gate = body }, effect: (body: any) => { const disposer = body(); disposers.push(disposer) } }
   const plugin = createPlugin(ctx, {}, { ...deps, dataRoot: root, defaultSshHome: root })
   const call = async (method: string, payload: any = {}) => {
     const path = `/api/zterm/${method}`, response = await routes.get(path).fetch(new Request(`http://localhost${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ type: 'client-request', rpcId: 'test-rpc', method: `zterm/${method}`, payload }) }))
     return (await response.json()).result
   }
-  return { root, call, routes, registered, credentials, gate, plugin, ctx, dispose: () => disposers.forEach((d) => d?.()) }
+  return { root, call, routes, registered, sections, listeners, credentials, gate, toolProvider: () => toolProvider, activateSettings: () => { activateInject?.(); activateInject = undefined }, plugin, ctx, dispose: () => disposers.forEach((d) => d?.()) }
 }
 describe('DSH 宿主接口', () => {
   it('只在认证 Connection 通道登记工作台接口，工具没有修改模式入口', () => {
@@ -32,6 +34,54 @@ describe('DSH 宿主接口', () => {
     expect(fixture.registered.map((t) => t.name)).not.toContain('zterm_set_mode')
     for (const tool of fixture.registered) expect(tool.output.schema).toEqual({ type: 'string' })
     fixture.dispose()
+  })
+  it('临时禁用后撤下全部 zTerm 工具与提示，恢复后原样注册', async () => {
+    const fixture = setup()
+    try {
+      expect(fixture.registered).toHaveLength(14)
+      expect(fixture.sections).toHaveLength(1)
+      expect(fixture.sections[0].text({})).toContain('zTerm')
+      expect(fixture.toolProvider()({})).toEqual({ schemas: [] })
+      expect(await fixture.call('status')).toMatchObject({ ok: true, value: { temporarilyDisabled: false } })
+      expect((await fixture.call('config', { patch: { temporarilyDisabled: true }, revision: 1 })).ok).toBe(true)
+      expect(fixture.registered).toHaveLength(0)
+      expect(fixture.sections[0].text({})).toBe('')
+      expect(fixture.toolProvider()({})).toMatchObject({ schemas: [], knownNames: expect.arrayContaining(['zterm_execute', 'zterm_read_file']) })
+      expect(await fixture.call('status')).toMatchObject({ ok: true, value: { temporarilyDisabled: true } })
+      expect((await fixture.call('catalog')).value.temporarilyDisabled).toBe(true)
+      expect(await fixture.gate({ name: 'zterm_read_file' }, async () => ({ kind: 'allow' }))).toMatchObject({ kind: 'deny' })
+      expect(await fixture.gate({ name: 'bash' }, async () => ({ kind: 'allow' }))).toEqual({ kind: 'allow' })
+      expect((await fixture.call('config', { patch: { temporarilyDisabled: false }, revision: 2 })).ok).toBe(true)
+      expect(fixture.registered).toHaveLength(14)
+      expect(fixture.sections[0].text({})).toContain('zTerm')
+    } finally { fixture.dispose() }
+  })
+  it('以禁用状态启动时工具和提示都不进入 AI 上下文', () => {
+    const fixture = setup({ temporarilyDisabled: true })
+    try {
+      expect(fixture.registered).toHaveLength(0)
+      expect(fixture.sections[0].text({})).toBe('')
+    } finally { fixture.dispose() }
+  })
+  it('设置服务晚于插件就绪时，按已保存的禁用状态撤下工具', () => {
+    const fixture = setup({}, new Map(), { deferSettings: true })
+    try {
+      expect(fixture.registered).toHaveLength(14)
+      fixture.ctx.settings.describe = () => [{ ns: 'zterm', value: { ...DEFAULT_CONFIG, temporarilyDisabled: true }, revision: 2 }]
+      fixture.activateSettings()
+      expect(fixture.registered).toHaveLength(0)
+      expect(fixture.sections[0].text({})).toBe('')
+    } finally { fixture.dispose() }
+  })
+  it('宿主设置变更事件也会同步工具注册，无需重启', () => {
+    const fixture = setup()
+    try {
+      const value = { ...fixture.plugin.config(), temporarilyDisabled: true }
+      fixture.ctx.settings.describe = () => [{ ns: 'zterm', value, revision: 2 }]
+      for (const listener of fixture.listeners.get('settings/document-updated') ?? []) listener('zterm', 2)
+      expect(fixture.registered).toHaveLength(0)
+      expect(fixture.sections[0].text({})).toBe('')
+    } finally { fixture.dispose() }
   })
   it('主机秘密只写凭据库，配置及 catalog 不返回密码', async () => {
     const fixture = setup()

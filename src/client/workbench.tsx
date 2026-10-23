@@ -88,6 +88,7 @@ export function Workbench({ ctx, sessionId, visible = true, onClose }: { ctx: Cl
     startDrag(event, (e) => { const value = Math.max(180, Math.min(440, width + start - e.clientX)); setListWidth(value); saveNumber('dsh-zterm.list-width', value) })
   }
   return <div className="zt-workbench">
+    {catalog?.temporarilyDisabled && <div className="zt-workbench-notice" role="status">zTerm 已临时禁用：AI 不会收到本插件提示，也不能调用 zterm_* 工具；手工连接、终端和配置管理仍可使用。可在「设置 → zTerm」恢复。</div>}
     {error && <div className="zt-error-banner" role="alert"><span>{error}</span><button aria-label="关闭错误提示" onClick={() => setError('')}>×</button></div>}
     <div className="zt-workbench-body">
       <main className="zt-terminal-area">

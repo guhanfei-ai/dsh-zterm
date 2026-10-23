@@ -4,7 +4,7 @@ import { normalizeSshHost, normalizeSshPort, normalizeSshUsername } from '../cor
 import type { Config, HostTarget, HostFolder, JumpProfile, SavedCredential } from '../shared/types'
 
 export const DEFAULT_CONFIG: Config = {
-  hosts: [], folders: [], jumpservers: [], credentials: [], allowLocalTerminal: false, allowExternalTargets: false,
+  hosts: [], folders: [], jumpservers: [], credentials: [], allowLocalTerminal: false, allowExternalTargets: false, temporarilyDisabled: false,
   defaultSshUsername: '', defaultPrivateKeyPath: '', defaultCredentialId: '',
   defaultPanelWidth: 60, maxSessions: 12, maxWriteCalls: 100, commandTimeoutMs: 30000,
 }
@@ -16,6 +16,7 @@ export const ConfigSchema = Schema.object({
   defaultCredentialId: Schema.string().default('').volatile().description('新主机使用的默认私钥凭证；留空使用宿主默认私钥文件。'),
   allowLocalTerminal: Schema.boolean().default(false).volatile().description('允许打开 DSH 宿主的本地终端。'),
   allowExternalTargets: Schema.boolean().default(false).volatile().description('允许使用已配置 SSH 凭据连接上层提供的资产地址。'),
+  temporarilyDisabled: Schema.boolean().default(false).volatile().description('临时禁用 AI 侧的 zTerm：撤下工具与系统提示；人类工作台、手工终端和配置管理不受影响。'),
   defaultSshUsername: Schema.string().default('').volatile().description('新主机默认登录账号；留空使用 DSH 宿主当前用户，对话明确指定账号时优先采用。'),
   defaultPrivateKeyPath: Schema.string().default('').volatile().description('DSH 宿主的默认 SSH 私钥文件；留空查找 ~/.ssh/id_ed25519、id_rsa、id_ecdsa。'),
   defaultPanelWidth: Schema.number().default(60).volatile().description('独立面板默认宽度百分比（30–80）。'),
@@ -122,7 +123,7 @@ export function validateConfig(value: unknown): Config {
     while (next) { if (seen.has(next) || !folderMap.has(next)) throw new Error('文件夹父节点不存在或存在循环'); seen.add(next); next = folderMap.get(next)!.parentId }
   }
   for (const host of hosts) if (host.folderId && !folderMap.has(host.folderId)) throw new Error('主机所属文件夹不存在')
-  return { hosts, folders, jumpservers, credentials, defaultCredentialId, allowLocalTerminal: boolean(raw.allowLocalTerminal, false), allowExternalTargets: boolean(raw.allowExternalTargets, false),
+  return { hosts, folders, jumpservers, credentials, defaultCredentialId, allowLocalTerminal: boolean(raw.allowLocalTerminal, false), allowExternalTargets: boolean(raw.allowExternalTargets, false), temporarilyDisabled: boolean(raw.temporarilyDisabled, false),
     defaultSshUsername: optionalText(raw.defaultSshUsername, 200), defaultPrivateKeyPath: keyFilePath(raw.defaultPrivateKeyPath),
     defaultPanelWidth: integer(raw.defaultPanelWidth, 60, 30, 80), maxSessions: integer(raw.maxSessions, 12, 1, 32),
     maxWriteCalls: integer(raw.maxWriteCalls, 100, 1, 1000), commandTimeoutMs: integer(raw.commandTimeoutMs, 30000, 1000, 120000) }

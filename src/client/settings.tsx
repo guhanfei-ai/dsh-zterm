@@ -8,6 +8,7 @@ const CONFIG_KEYS = ['allowLocalTerminal', 'defaultSshUsername', 'defaultPrivate
 import { useTerminalFontSize, setTerminalFontSize, DEFAULT_TERMINAL_FONT_SIZE, MIN_TERMINAL_FONT_SIZE, MAX_TERMINAL_FONT_SIZE } from './preferences'
 export function SettingsPanel({ ctx }: { ctx: ClientContext }) {
   const [config, setConfig] = useState<any>(), [error, setError] = useState(''), [saving, setSaving] = useState(false), [message, setMessage] = useState('')
+  const [toggling, setToggling] = useState(false), [toggleError, setToggleError] = useState('')
   const fontSize = useTerminalFontSize(), [fontDraft, setFontDraft] = useState(String(fontSize))
   const baseline = useRef<any>(), alive = useRef(true)
   const loadConfig = useCallback(async () => {
@@ -19,7 +20,32 @@ export function SettingsPanel({ ctx }: { ctx: ClientContext }) {
   useEffect(() => setFontDraft(String(fontSize)), [fontSize])
   useEffect(() => { alive.current = true; void loadConfig().catch((e) => { if (alive.current) setError(e.message) }); return () => { alive.current = false } }, [loadConfig])
   const patch = (key: string, value: unknown) => { setConfig({ ...config, [key]: value }); setMessage('') }
-  return <section className="zt-settings"><h2>{PRODUCT_NAME}</h2><p>在 DSH 对话右侧连接真实机器。默认读模式，由人类在已绑定终端的工具栏开启读写。</p>
+  const toggleDisabled = async (checked: boolean) => {
+    if (!config || toggling) return
+    const previous = Boolean(config.temporarilyDisabled)
+    setToggling(true); setToggleError(''); setMessage('')
+    setConfig({ ...config, temporarilyDisabled: checked })
+    try {
+      await rpc(ctx, 'config', { patch: { temporarilyDisabled: checked }, revision: config.revision })
+    } catch (e) {
+      setConfig((current: any) => ({ ...current, temporarilyDisabled: previous }))
+      setToggleError(e instanceof Error ? e.message : '切换失败，请重试')
+      setToggling(false)
+      return
+    }
+    window.dispatchEvent(new CustomEvent('dsh-zterm:state'))
+    setToggling(false)
+    try { await loadConfig() } catch (e) { setToggleError(e instanceof Error ? e.message : '已切换，但刷新配置失败') }
+  }
+  return <section className="zt-settings"><h2>{PRODUCT_NAME}</h2>
+    <div className={`zt-settings-card zt-switch-card${config?.temporarilyDisabled ? ' active' : ''}`}>
+      <strong>临时禁用 zTerm</strong>
+      <label className="zt-check"><input type="checkbox" role="switch" aria-label="临时禁用 zTerm" checked={Boolean(config?.temporarilyDisabled)} disabled={!config || toggling} onChange={(event) => void toggleDisabled(event.target.checked)} />AI 暂时不使用 zTerm</label>
+      <p className="zt-hint">插件保持启用，只让 AI 暂时看不到、也用不了 zTerm 工具，并停止注入 zTerm 提示；工作台、手工终端和主机／凭据管理不受影响。点击立即生效，无需保存设置。</p>
+      {config?.temporarilyDisabled && <p className="zt-switch-status" role="status">已临时禁用：AI 不会收到 zTerm 提示，也不能调用 zterm_* 工具。</p>}
+      {toggleError && <p className="zt-error" role="alert">{toggleError}</p>}
+    </div>
+    <p>在 DSH 对话右侧连接真实机器。默认读模式，由人类在已绑定终端的工具栏开启读写。</p>
     <div className="zt-settings-card"><strong>终端外观</strong>
       <label className="zt-field"><span>终端字体大小（px）</span><input type="number" min={MIN_TERMINAL_FONT_SIZE} max={MAX_TERMINAL_FONT_SIZE} step={1} value={fontDraft}
         onChange={(e) => { setFontDraft(e.target.value); setTerminalFontSize(Number(e.target.value)) }} onBlur={() => setFontDraft(String(fontSize))} /></label>

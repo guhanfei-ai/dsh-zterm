@@ -34,7 +34,7 @@ export function apply(ctx: ClientContext) {
     return () => { disposeTitle?.(); dispose?.(); sidebar = undefined; notify() }
   })
   function Header(props: any) {
-    const service = useSidebar(), [open, setOpen] = useState(false), [message, setMessage] = useState('')
+    const service = useSidebar(), [open, setOpen] = useState(false), [message, setMessage] = useState(''), [disabled, setDisabled] = useState(false)
     const sessionId = props.sessionId ?? props.scope?.sessionId, scope = props.scope ?? { sessionId }
     const nodesHook = props.useChat ?? props.useSession
     const nodes = typeof nodesHook === 'function' ? nodesHook((snapshot: any) => snapshot.legacy?.nodes ?? snapshot.nodes) : undefined
@@ -46,6 +46,13 @@ export function apply(ctx: ClientContext) {
     }
     useEffect(() => { if (sessionId) void rpc(ctx, 'client/attach', { sessionId, pageId }).catch(() => {}) }, [sessionId])
     useEffect(() => {
+      let alive = true
+      const refresh = () => { void rpc<any>(ctx, 'status').then((value) => { if (alive) setDisabled(Boolean(value?.temporarilyDisabled)) }).catch(() => {}) }
+      refresh()
+      window.addEventListener('dsh-zterm:state', refresh)
+      return () => { alive = false; window.removeEventListener('dsh-zterm:state', refresh) }
+    }, [ctx])
+    useEffect(() => {
       if (!nodes) return
       const stack = Array.isArray(nodes) ? [...nodes] : [nodes]; let last = ''
       for (let count = 0; stack.length && count < 5000; count++) { const node: any = stack.pop(); if (!node || typeof node !== 'object') continue
@@ -55,7 +62,7 @@ export function apply(ctx: ClientContext) {
       }
       if (last && last !== seen.current) { seen.current = last; show() }
     }, [nodes, service, sessionId])
-    return <><button className="zt-header-button" title={`打开 ${PRODUCT_NAME}`} onClick={show}>{icon(15)}{PRODUCT_NAME}</button>
+    return <><button className="zt-header-button" title={disabled ? `${PRODUCT_NAME} 已临时禁用：AI 不会使用本插件工具` : `打开 ${PRODUCT_NAME}`} onClick={show}>{icon(15)}{PRODUCT_NAME}{disabled && <span className="zt-header-badge">AI禁用</span>}</button>
       {open && !service && sessionId && <Standalone ctx={ctx} sessionId={sessionId} onClose={() => setOpen(false)} onConflict={() => { setOpen(false); setMessage(`脑图面板已展开，${PRODUCT_NAME} 独立面板已收起。可以从 ${PRODUCT_NAME} 入口重新打开。`) }} />}
       {message && <div className="zt-standalone-error" role="alert">{message}<button onClick={() => setMessage('')}>关闭</button></div>}</>
   }

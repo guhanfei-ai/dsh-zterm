@@ -10,7 +10,8 @@ const dirs: string[] = []
 afterEach(() => dirs.splice(0).forEach((dir) => rmSync(dir, { recursive: true, force: true })))
 describe('配置与持久记录', () => {
   it('默认不启用本地或外部地址能力，默认命令预算为 100', () => {
-    expect(validateConfig({})).toMatchObject({ allowLocalTerminal: false, allowExternalTargets: false, maxWriteCalls: 100 })
+    expect(validateConfig({})).toMatchObject({ allowLocalTerminal: false, allowExternalTargets: false, temporarilyDisabled: false, maxWriteCalls: 100 })
+    expect(() => validateConfig({ temporarilyDisabled: 'yes' })).toThrow('开关')
   })
   it('拒绝循环目录、明文秘密、非插件凭据引用及畸形地址', () => {
     expect(() => validateConfig({ folders: [{ id: 'a', label: 'A', parentId: 'b' }, { id: 'b', label: 'B', parentId: 'a' }] })).toThrow('循环')

@@ -25,6 +25,8 @@ export function createPlugin(ctx: any, entryConfig: any = {}, deps: { dataRoot?:
   const root = deps.dataRoot ?? join(process.env.DSH_HOME ?? join(homedir(), '.dsh'), 'zterm')
   const store = new RecordStore(root)
   let settings: any, legacyScope: any
+  // 设置服务可能晚于插件就绪；到时候再按真实配置核对一次工具注册。
+  let reconcile = () => {}
   const initialConfig = validateConfig({ ...DEFAULT_CONFIG, ...plain(entryConfig) })
   const entry = () => initialConfig
   const descriptor = () => settings?.describe?.().find((row: any) => row.ns === 'zterm')
@@ -68,6 +70,7 @@ export function createPlugin(ctx: any, entryConfig: any = {}, deps: { dataRoot?:
   if (ctx.inject) ctx.inject(['settings'], (sctx: any) => {
     settings = sctx.settings
     if (typeof settings.register === 'function') legacyScope = settings.register('zterm', Config, { base: entry(), validate: validateConfig })
+    reconcile()
     return () => { settings = undefined; legacyScope = undefined }
   })
   const session = (sessionId: unknown) => { const value = id(sessionId, 'DSH 会话'); if (!ctx.sessions?.get?.(value)) throw new ZtermError('unknown_session', 'DSH 会话不存在'); return value }
@@ -82,10 +85,36 @@ export function createPlugin(ctx: any, entryConfig: any = {}, deps: { dataRoot?:
     sessionCwd: (value) => ctx.sessions?.get?.(value)?.header?.cwd, terminalFactory: deps.terminalFactory, defaultSshHome: deps.defaultSshHome,
     configRevision: () => descriptor()?.revision,
     resolveAutomaticTarget: (target, signal) => resolver.resolve(target, signal) })
-  ctx.systemPrompt.section({ name: 'tool:zterm', order: 109, text: GUIDANCE })
-  for (const definition of definitions(runtime, config, ctx.sessions)) ctx.tools.register(definition)
+  const disabled = () => config().temporarilyDisabled
+  // 提示文本在每次装配时求值：禁用后整段不注入，AI 不再被引导回本插件。
+  ctx.systemPrompt.section({ name: 'tool:zterm', order: 109, text: () => disabled() ? '' : GUIDANCE })
+  // 工具注册随开关实时增减；禁用时模型工具表里不留 zterm_*。
+  const toolDisposers = new Map<string, () => void>()
+  let toolsRegistered = false
+  const syncTools = () => {
+    const shouldRegister = !disabled()
+    if (shouldRegister === toolsRegistered) return
+    if (!shouldRegister) {
+      for (const dispose of toolDisposers.values()) { try { dispose() } catch { /* 插件卸载时宿主可能已释放。 */ } }
+      toolDisposers.clear(); toolsRegistered = false; return
+    }
+    for (const definition of definitions(runtime, config, ctx.sessions)) {
+      const dispose = ctx.tools.register(definition)
+      if (typeof dispose === 'function') toolDisposers.set(definition.name, dispose)
+    }
+    toolsRegistered = true
+  }
+  reconcile = syncTools
+  syncTools()
+  // 撤下工具时仍保留名字全集，避免宿主 toolOrder 引用这些名字时装配失败。
+  const toolNames = definitions(runtime, config, ctx.sessions).map((definition) => definition.name)
+  ctx.systemPrompt.tools?.(() => disabled() ? { schemas: [], knownNames: toolNames } : { schemas: [] })
+  // 宿主设置页或其它客户端写入后同步一次；事件按 namespace 过滤。
+  ctx.on('settings/document-updated', (ns: string) => { if (ns === 'zterm') syncTools() })
   ctx.on('tools/pre-execute', async (exec: any, next: () => Promise<any>) => {
     const decision = await next()
+    if (decision.kind === 'deny') return decision
+    if (disabled() && String(exec.name ?? '').startsWith('zterm_')) return { kind: 'deny', reason: `${PRODUCT_NAME} 已临时禁用，AI 暂不能使用本插件工具；请由人类在设置中恢复。` }
     if (decision.kind !== 'allow' || exec.name !== 'zterm_execute') return decision
     try {
       const view = runtime.workspace(sessionIdOf(exec, ctx.sessions))
@@ -105,10 +134,11 @@ export function createPlugin(ctx: any, entryConfig: any = {}, deps: { dataRoot?:
         credentialsConfigured: Object.fromEntries(await Promise.all(refs.map(async (ref) => [ref, typeof ctx.credentials.describe === 'function' ? Boolean((await ctx.credentials.describe(ref))?.configured) : Boolean((await ctx.credentials.resolve(ref))?.value)]))) }
     }
     if (method === 'config') {
-      const allowed = ['allowLocalTerminal', 'allowExternalTargets', 'defaultSshUsername', 'defaultPrivateKeyPath', 'defaultCredentialId', 'defaultPanelWidth', 'maxSessions', 'maxWriteCalls', 'commandTimeoutMs']
+      const allowed = ['allowLocalTerminal', 'allowExternalTargets', 'temporarilyDisabled', 'defaultSshUsername', 'defaultPrivateKeyPath', 'defaultCredentialId', 'defaultPanelWidth', 'maxSessions', 'maxWriteCalls', 'commandTimeoutMs']
       const patch = Object.fromEntries(Object.entries(payload.patch ?? {}).filter(([key]) => allowed.includes(key)))
-      await update(patch, payload.revision); return { saved: true, revision: descriptor()?.revision }
+      await update(patch, payload.revision); syncTools(); return { saved: true, revision: descriptor()?.revision }
     }
+    if (method === 'status') return { temporarilyDisabled: config().temporarilyDisabled, revision: descriptor()?.revision }
     if (method === 'hosts/export') return config().hosts.map((host) => `# ${host.label}\nHost ${host.id.replace(/[^\w-]/g, '_')}\n  HostName ${host.host}\n  Port ${host.port}\n  User ${host.username}\n`).join('\n')
     if (method === 'credential/save') {
       checkRevision(payload.revision)
@@ -227,7 +257,7 @@ export function createPlugin(ctx: any, entryConfig: any = {}, deps: { dataRoot?:
     catch (error) { return { ok: false, error: { code: error instanceof ZtermError ? error.code : 'invalid_request', message: runtime.sanitize(error instanceof Error ? error.message : '请求失败'), details: {} } } }
   }
   // /api 的唯一拦截器由 DSH Gateway 持有；精确 Fetch 路由仍经过 Connection 认证。
-  const methods = ['catalog', 'config', 'hosts/export', 'host/save', 'host/delete', 'folder/save', 'folder/delete', 'jump/save', 'jump/delete', 'jump/query', 'credential/save', 'credential/unset', 'client/attach', 'poll', 'connect', 'bind', 'mode', 'input', 'shell-ready', 'resize', 'trust', 'trust/reset', 'stop', 'disconnect', 'close', 'reconnect', 'saved-workspace', 'restore', 'results', 'terminal/export']
+  const methods = ['catalog', 'config', 'status', 'hosts/export', 'host/save', 'host/delete', 'folder/save', 'folder/delete', 'jump/save', 'jump/delete', 'jump/query', 'credential/save', 'credential/unset', 'client/attach', 'poll', 'connect', 'bind', 'mode', 'input', 'shell-ready', 'resize', 'trust', 'trust/reset', 'stop', 'disconnect', 'close', 'reconnect', 'saved-workspace', 'restore', 'results', 'terminal/export']
   for (const method of methods) ctx.effect(() => ctx.connection.fetch.register({
     path: `/api/zterm/${method}`, methods: ['POST'], requestBody: 'buffered',
     async fetch(request: Request) {
