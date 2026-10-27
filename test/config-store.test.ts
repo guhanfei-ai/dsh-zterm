@@ -35,7 +35,7 @@ describe('配置与持久记录', () => {
     expect(store.history('s1')[0].status).toBe('completed'); expect(store.history('s2')).toEqual([])
   })
   it('重连快照替换输出，重复帧不重复显示，旧代次不混入新终端', () => {
-    const previous = new Map([['t', { generation: 1, text: 'old', seq: 2 }]])
+    const previous = new Map([['t', { generation: 1, text: 'old', seq: 2, epoch: 0, end: 3 }]])
     const next = mergeFrames(previous, { reset: false, output: [{ seq: 2, terminalId: 't', generation: 1, text: 'duplicate' }, { seq: 3, terminalId: 't', generation: 2, text: 'new' }], workspace: { terminals: [{ id: 't' }] } })
     expect(next.get('t')?.text).toBe('new')
     const reset = mergeFrames(next, { reset: true, cursor: 5, snapshots: [{ terminalId: 't', generation: 2, text: 'snapshot' }], workspace: { terminals: [{ id: 't' }] } })

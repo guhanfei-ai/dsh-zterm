@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react'
 import type { ClientContext, WorkspaceView, TerminalView, HostTarget, HostFolder, JumpProfile, PollResult } from '../shared/types'
-import { rpc, download, timestamp, mergeFrames, progressElapsed } from './api'
+import { rpc, download, timestamp, mergeFrames, progressElapsed, type TerminalBuffer } from './api'
 import { TerminalScreen } from './terminal'
 import { HostEditor, JumpEditor, FolderEditor, Modal } from './forms'
 import { FolderTree } from './folders'
@@ -13,7 +13,7 @@ const EMPTY: WorkspaceView = { terminals: [], operations: [], revision: 0, capab
 const status: Record<string, string> = { connecting: '连接中', ready: '已连接', disconnected: '已断开', error: '连接失败', executing: '执行中', completed: '完成', failed: '失败', unknown: '结果不明', blocked: '已拒绝', not_sent: '未下发' }
 export const pageId = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `page-${Date.now()}-${Math.random()}`
 export function Workbench({ ctx, sessionId, visible = true, onClose }: { ctx: ClientContext; sessionId: string; visible?: boolean; onClose?: () => void }) {
-  const [workspace, setWorkspace] = useState<WorkspaceView>(EMPTY), [buffers, setBuffers] = useState<Map<string, any>>(new Map()), [active, setActive] = useState('')
+  const [workspace, setWorkspace] = useState<WorkspaceView>(EMPTY), [buffers, setBuffers] = useState<Map<string, TerminalBuffer>>(new Map()), [active, setActive] = useState('')
   const [error, setError] = useState(''), [catalog, setCatalog] = useState<any>(), [query, setQuery] = useState(''), [offset, setOffset] = useState(0), [folder, setFolder] = useState('')
   const [source, setSource] = useState<'ssh' | 'jumpserver'>('ssh'), [hostEditor, setHostEditor] = useState<HostTarget | null | false>(false), [jumpEditor, setJumpEditor] = useState<JumpProfile | null | false>(false), [folderEditor, setFolderEditor] = useState<HostFolder | null | false>(false)
   const [instanceId, setInstanceId] = useState(''), [nodeId, setNodeId] = useState(''), [nodes, setNodes] = useState<any[]>([]), [assets, setAssets] = useState<any>(), [accounts, setAccounts] = useState<any>(), [asset, setAsset] = useState<any>()
@@ -108,7 +108,8 @@ export function Workbench({ ctx, sessionId, visible = true, onClose }: { ctx: Cl
             <button disabled={!current.busy} onClick={() => void action('stop', parameters)}>停止</button>
             <button disabled={actionBusy || current.busy} onClick={() => void action(current.state === 'ready' ? 'disconnect' : 'reconnect', parameters)}>{current.state === 'ready' ? '断开' : '重连'}</button></div></div>
           {!current.agentReady && current.state === 'ready' && !current.uncertain && <div className="zt-notice">手工输入后，AI 已暂停操作。确认终端回到空闲 Shell 后：<button onClick={() => void action('shell-ready', parameters)}>确认空闲 Shell</button></div>}
-          {current.uncertain && <div className="zt-notice danger">前次操作结果不明，已停止自动下发。核实机器状态后重新建立连接。<button disabled={actionBusy} onClick={() => void action('reconnect', parameters)}>重建连接</button></div>}
+          {current.uncertain && <div className="zt-notice danger">前次操作结果不明，已停止自动下发。核实机器状态后重新建立连接。<button disabled={actionBusy || current.busy}
+            onClick={() => setConfirm({ text: `重建「${current.target.label}」的连接？当前 Shell 会断开，仍在前台运行的命令可能随之终止，请先在终端核实远端状态。`, act: () => { void action('reconnect', parameters); setConfirm(undefined) } })}>重建连接</button></div>}
           {current.error && <div className="zt-notice danger">{current.error}</div>}
         </> : <div className="zt-empty"><div className="zt-terminal-mark">&gt;_</div><h3>连接一台机器</h3><p>从右侧选择主机或 JumpServer 资产。<br />连接后可手工操作，或绑定给当前 DSH 对话中的 AI。</p>
           {workspace.capabilities.automatic && <p>也可在对话中指定主机名或 IP，AI 会先查远程主机，再查 JumpServer，最后使用默认 SSH 私钥。</p>}
