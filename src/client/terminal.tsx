@@ -11,16 +11,28 @@ export function TerminalScreen({ ctx, sessionId, terminal, buffer, visible, onEr
 }) {
   const root = useRef<HTMLDivElement>(null), instance = useRef<Terminal>(), search = useRef<SearchAddon>(), fit = useRef<FitAddon>()
   const rendered = useRef(''), state = useRef(terminal), error = useRef(onError), inputQueue = useRef(Promise.resolve())
-  const syncSize = useRef<() => void>(() => {})
-  const [find, setFind] = useState(''), fontSize = useTerminalFontSize(), currentFontSize = useRef(fontSize)
-  currentFontSize.current = fontSize
+  const syncSize = useRef<() => void>(() => {}), disposeHandlers = useRef<() => void>(() => {})
+  const [find, setFind] = useState(''), fontSize = useTerminalFontSize(), currentFontSize = useRef(fontSize), bufferRef = useRef(buffer)
+  currentFontSize.current = fontSize; bufferRef.current = buffer
   state.current = terminal; error.current = onError
-  useLayoutEffect(() => {
-    if (!root.current) return
+  // 隐藏终端（display:none）里 xterm 的字符宽度测量 offsetWidth 恒为 0，宽度缓存
+  // 永不回填，每次渲染逐字符强制同步布局——这是 issue #3 整页冻结的根因（报告人
+  // CDP 实测阻塞窗口 96.6% CPU 在 _measure）。隐藏期间只累积缓冲，不写 xterm。
+  const flush = () => {
+    const term = instance.current, pending = bufferRef.current, generation = state.current.generation
+    if (!term || !pending || pending.generation !== generation || pending.text === rendered.current) return
+    if (pending.text.startsWith(rendered.current)) term.write(pending.text.slice(rendered.current.length))
+    else { term.reset(); term.write(pending.text) }
+    rendered.current = pending.text
+  }
+  // xterm 实例延迟到终端第一次可见时创建：从未可见过的终端不渲染、不测量。
+  const create = () => {
+    if (instance.current || !root.current) return
+    const container = root.current
     const term = new Terminal({ cursorBlink: true, fontSize: currentFontSize.current, fontFamily: 'Menlo, Consolas, monospace', scrollback: 5000,
       allowProposedApi: false, convertEol: false, theme: { background: '#12161d', foreground: '#dce3ed', cursor: '#e4edf8', selectionBackground: '#334b66' } })
     const fitAddon = new FitAddon(), searchAddon = new SearchAddon()
-    term.loadAddon(fitAddon); term.loadAddon(searchAddon); term.open(root.current)
+    term.loadAddon(fitAddon); term.loadAddon(searchAddon); term.open(container)
     instance.current = term; fit.current = fitAddon; search.current = searchAddon; rendered.current = ''
     let disposed = false
     const input = term.onData((data) => {
@@ -35,18 +47,21 @@ export function TerminalScreen({ ctx, sessionId, terminal, buffer, visible, onEr
     syncSize.current = () => { if (disposed || !root.current?.clientWidth) return; fitAddon.fit(); const current = state.current
       if (current.state === 'ready') void rpc(ctx, 'resize', { sessionId, terminalId: current.id, generation: current.generation, cols: term.cols, rows: term.rows }).catch((e) => { if (!disposed) error.current(e.message) }) }
     const resize = () => { clearTimeout(timer); timer = setTimeout(() => syncSize.current(), 80) }
-    const observer = new ResizeObserver(resize); observer.observe(root.current); resize()
-    const key = (event: KeyboardEvent) => { if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'f') { event.preventDefault(); document.getElementById(`zterm-find-${terminal.id}`)?.focus() } }
-    root.current.addEventListener('keydown', key)
-    return () => { disposed = true; syncSize.current = () => {}; clearTimeout(timer); observer.disconnect(); input.dispose(); root.current?.removeEventListener('keydown', key); term.dispose(); instance.current = undefined }
-  }, [ctx, sessionId, terminal.id, terminal.generation])
-  useEffect(() => {
-    const term = instance.current
-    if (!term || !buffer || buffer.generation !== terminal.generation) return
-    if (buffer.text.startsWith(rendered.current)) term.write(buffer.text.slice(rendered.current.length))
-    else { term.reset(); term.write(buffer.text) }
-    rendered.current = buffer.text
-  }, [buffer, terminal.generation])
+    const observer = new ResizeObserver(resize); observer.observe(container); resize()
+    // Ctrl+F 会被 xterm 当作控制字符输入吞掉，监听放捕获阶段先于 xterm 处理；Cmd+F 一并覆盖。
+    const key = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === 'f') {
+        event.preventDefault(); event.stopPropagation()
+        document.getElementById(`zterm-find-${terminal.id}`)?.focus()
+      }
+    }
+    container.addEventListener('keydown', key, true)
+    disposeHandlers.current = () => { disposed = true; syncSize.current = () => {}; clearTimeout(timer); observer.disconnect(); input.dispose(); container.removeEventListener('keydown', key, true); term.dispose(); instance.current = undefined }
+  }
+  // 身份变化或卸载才销毁实例；切换标签只停写，保留实例与滚动历史。
+  useLayoutEffect(() => () => { disposeHandlers.current(); disposeHandlers.current = () => {} }, [ctx, sessionId, terminal.id, terminal.generation])
+  useLayoutEffect(() => { if (visible) create() }, [visible, ctx, sessionId, terminal.id, terminal.generation])
+  useEffect(() => { if (visible) flush() }, [buffer, visible, terminal.generation])
   useLayoutEffect(() => {
     const term = instance.current
     if (!term || term.options.fontSize === fontSize) return

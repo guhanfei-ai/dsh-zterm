@@ -108,7 +108,7 @@ export function Workbench({ ctx, sessionId, visible = true, onClose }: { ctx: Cl
             <button disabled={!current.busy} onClick={() => void action('stop', parameters)}>停止</button>
             <button disabled={actionBusy || current.busy} onClick={() => void action(current.state === 'ready' ? 'disconnect' : 'reconnect', parameters)}>{current.state === 'ready' ? '断开' : '重连'}</button></div></div>
           {!current.agentReady && current.state === 'ready' && !current.uncertain && <div className="zt-notice">手工输入后，AI 已暂停操作。确认终端回到空闲 Shell 后：<button onClick={() => void action('shell-ready', parameters)}>确认空闲 Shell</button></div>}
-          {current.uncertain && <div className="zt-notice danger">前次操作结果不明，已停止自动下发。核实机器状态后重新建立连接。</div>}
+          {current.uncertain && <div className="zt-notice danger">前次操作结果不明，已停止自动下发。核实机器状态后重新建立连接。<button disabled={actionBusy} onClick={() => void action('reconnect', parameters)}>重建连接</button></div>}
           {current.error && <div className="zt-notice danger">{current.error}</div>}
         </> : <div className="zt-empty"><div className="zt-terminal-mark">&gt;_</div><h3>连接一台机器</h3><p>从右侧选择主机或 JumpServer 资产。<br />连接后可手工操作，或绑定给当前 DSH 对话中的 AI。</p>
           {workspace.capabilities.automatic && <p>也可在对话中指定主机名或 IP，AI 会先查远程主机，再查 JumpServer，最后使用默认 SSH 私钥。</p>}
