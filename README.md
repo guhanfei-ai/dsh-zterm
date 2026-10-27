@@ -74,21 +74,6 @@ npm pack --ignore-scripts --pack-destination "out"
 
 `verify` 包含 TypeScript、Vitest、宿主与客户端构建。测试只使用虚构数据、独立临时目录以及测试拥有的回环 HTTP／SSH／PTY，不连接真实机器。SDK 检查使用已安装包创建临时 Cordis 上下文，不启动真实 DSH。
 
-## 发布
-
-[deploy.sh](deploy.sh) 沿用 dsh-grafana 的维护者手动发布流程：
-
-```sh
-./deploy.sh release   # 输入版本号，验证后提交、打标签并推送
-./deploy.sh build     # 安装开发依赖、准备原生依赖、验证和编译，打包到 dist/
-./deploy.sh publish   # 校验当前版本安装包，发布到 npm 与 GitHub Release
-./deploy.sh all       # 依次执行上述三步
-```
-
-发布链路默认限 main 分支，凭证和确认提示与来源项目一致。构建保留已有版本产物；分发只使用当前包名与版本对应的归档，并核对包内版本、宿主及客户端 bundle。脚本可从任意目录调用，不安装到 DSH profile，也不重启 Web 或桌面服务。
-
-`release` 和 `all` 包含 Git 写操作，`publish` 会上传安装包，由维护者本人执行；AI 在本项目的 Git 写禁令仍然有效。
-
 ## 执行和数据边界
 
 AI 执行要求空闲 POSIX Shell。每次调用使用独立子 Shell，`cd`／`export` 不改变后续调用的环境。结果不明的操作不会自动重试；核实远端后重建连接。
