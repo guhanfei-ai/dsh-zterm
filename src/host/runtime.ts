@@ -26,7 +26,7 @@ interface Entry {
 }
 interface State {
   entries: Map<string, Entry>; binding?: BindingView & { token: string; identity: string }
-  operations: Operation[]; frames: OutputFrame[]; cursor: number; revision: number; calls: Set<string>; pageId?: string; restoring?: boolean
+  operations: Operation[]; frames: OutputFrame[]; frameChars: number; cursor: number; revision: number; calls: Set<string>; pageId?: string; restoring?: boolean
 }
 export interface RuntimeDeps {
   config: () => Config; credentials: { resolve(ref: string): Promise<{ value: string } | undefined> }
@@ -52,7 +52,7 @@ export class ZtermRuntime {
     id(sessionId, 'DSH 会话标识')
     if (!this.states.has(sessionId)) {
       if (this.states.size >= 256) fail('session_limit', '插件会话数量已达上限')
-      this.states.set(sessionId, { entries: new Map(), operations: this.deps.store.history(sessionId), frames: [], cursor: 0, revision: 0, calls: this.deps.store.calls(sessionId) })
+      this.states.set(sessionId, { entries: new Map(), operations: this.deps.store.history(sessionId), frames: [], frameChars: 0, cursor: 0, revision: 0, calls: this.deps.store.calls(sessionId) })
     }
     return this.states.get(sessionId)!
   }
@@ -171,8 +171,9 @@ export class ZtermRuntime {
     state.entries.set(terminalId, entry)
     const current = () => state.entries.get(terminalId) === entry && !this.disposed
     terminal.on('data', (bytes: Buffer) => { if (!current()) return; const decoded = entry.decoder.write(bytes); if (!decoded) return
-      state.frames.push({ seq: ++state.cursor, terminalId, generation, text: this.sanitize(decoded).slice(-64000) });
-      let size = state.frames.reduce((n, f) => n + f.text.length, 0); while (state.frames.length > 1000 || size > 1000000) size -= state.frames.shift()!.text.length })
+      const text = this.sanitize(decoded).slice(-64000)
+      state.frames.push({ seq: ++state.cursor, terminalId, generation, text }); state.frameChars += text.length
+      while (state.frames.length > 1000 || state.frameChars > 1000000) state.frameChars -= state.frames.shift()!.text.length })
     terminal.on('host-trust-required', (event: any) => { if (current()) { entry.trust = { requestId: event.requestId, kind: event.kind, host: event.host, port: event.port,
       username: event.username, algorithm: event.algorithm, fingerprint: event.fingerprint, trustedFingerprint: event.trustedFingerprint }; this.touch(sessionId) } })
     const closed = () => { if (!current()) return; entry.state = 'disconnected'; entry.agentReady = false; entry.controllers.forEach((c) => c.abort());
@@ -328,7 +329,7 @@ export class ZtermRuntime {
     if (state.calls.has(callId)) return { content: [{ type: 'text', text: '重复调用已跳过；命令未再次执行。请查看已有操作记录。' }], details: { skipped: true, error: 'duplicate_call_id' } }
     if (state.calls.size >= 10000 || callId.length > 256) fail('call_limit', '当前会话执行标识已达上限，请开启新的 DSH 会话')
     state.calls.add(callId)
-    try { this.deps.store.saveCalls(sessionId, state.calls) } catch (error) { state.calls.delete(callId); throw error }
+    try { this.deps.store.addCall(sessionId, callId) } catch (error) { state.calls.delete(callId); throw error }
     return this.run(sessionId, callId, exec.signal, tool, command, prepared)
   }
   finalizeRead(sessionId: string, callId: string, tool: string, result: AgentToolResult<ReadExecutionDetails>): void {

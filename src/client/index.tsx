@@ -58,7 +58,11 @@ export function apply(ctx: ClientContext) {
       for (let count = 0; stack.length && count < 5000; count++) { const node: any = stack.pop(); if (!node || typeof node !== 'object') continue
         const name = node.name ?? node.call?.name ?? node.toolName
         if (['zterm_connect', 'zterm_bind'].includes(name)) { last = String(node.id ?? node.callId ?? node.call?.id ?? name); break }
-        for (const key of ['children', 'nodes', 'body', 'calls', 'subCalls']) { if (Array.isArray(node[key])) stack.push(...node[key]) }
+        for (const key of ['children', 'nodes', 'body', 'calls', 'subCalls']) {
+          const children = node[key]
+          // 不能用 spread：超大子节点数组会抛 RangeError，逐个限幅入栈。
+          if (Array.isArray(children)) for (const child of children) { if (stack.length >= 5000) break; stack.push(child) }
+        }
       }
       if (last && last !== seen.current) { seen.current = last; show() }
     }, [nodes, service, sessionId])

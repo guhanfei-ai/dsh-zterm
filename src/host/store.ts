@@ -37,6 +37,7 @@ export class RecordStore implements HostTrustStore {
     this.write('host-trust.json', parseSshHostTrustRecords(this.read('host-trust.json', [])).filter((r) => r.endpoint !== ep.endpoint))
   }
   private sessionFile(sessionId: string, suffix: string): string { return `${createHash('sha256').update(sessionId).digest('hex')}.${suffix}` }
+  private callsFile(sessionId: string): string { return this.sessionFile(sessionId, 'calls.jsonl') }
   append(record: Operation): void { this.ensure(); appendFileSync(this.path(this.sessionFile(record.sessionId, 'jsonl')), JSON.stringify(record) + '\n', { mode: 0o600 }) }
   history(sessionId: string, limit = 100): Operation[] {
     const path = this.path(this.sessionFile(sessionId, 'jsonl'))
@@ -52,6 +53,37 @@ export class RecordStore implements HostTrustStore {
   }
   saveWorkspace(sessionId: string, targets: ConnectTarget[]): void { this.write(this.sessionFile(sessionId, 'workspace.json'), { version: 1, targets }) }
   workspace(sessionId: string): ConnectTarget[] { const value = this.read(this.sessionFile(sessionId, 'workspace.json'), { targets: [] }); return Array.isArray(value.targets) ? value.targets.slice(0, 32) : [] }
-  calls(sessionId: string): Set<string> { const value = this.read(this.sessionFile(sessionId, 'calls.json'), []); if (!Array.isArray(value)) throw new Error('执行标识记录无效'); return new Set(value.filter((id) => typeof id === 'string' && id.length <= 256)) }
-  saveCalls(sessionId: string, calls: Set<string>): void { this.write(this.sessionFile(sessionId, 'calls.json'), [...calls]) }
+  /**
+   * 执行标识以每行一个标识的追加日志保存：每次调用只追加一行，
+   * 不随会话增长而重写整个集合（旧 calls.json 全量重写在长会话里是
+   * O(n) 同步写，issue #3 排查中量到 1 万标识时约 0.8ms/次，Windows
+   * 文件防护下会放大）。旧文件仍作为历史基数合并读取。
+   */
+  calls(sessionId: string): Set<string> {
+    const ids = new Set<string>()
+    const legacy = this.path(this.sessionFile(sessionId, 'calls.json'))
+    if (existsSync(legacy)) {
+      const value = this.read(this.sessionFile(sessionId, 'calls.json'), [])
+      if (!Array.isArray(value)) throw new Error('执行标识记录无效')
+      for (const id of value) if (typeof id === 'string' && id.length <= 256) ids.add(id)
+    }
+    const path = this.path(this.callsFile(sessionId))
+    if (!existsSync(path)) return ids
+    if (statSync(path).size > 8 * 1024 * 1024) throw new Error('执行标识记录无效')
+    for (const line of readFileSync(path, 'utf8').split('\n')) {
+      if (!line) continue
+      try { const id = JSON.parse(line); if (typeof id === 'string' && id.length <= 256) ids.add(id) } catch { /* 末尾不完整行不能让整个会话不可用；丢一个待重试标识。 */ }
+    }
+    return ids
+  }
+  addCall(sessionId: string, callId: string): void {
+    if (typeof callId !== 'string' || !callId || callId.length > 256) throw new Error('执行标识记录无效')
+    this.ensure(); const path = this.path(this.callsFile(sessionId))
+    appendFileSync(path, JSON.stringify(callId) + '\n', { mode: 0o600 })
+    // 有界压实：日志过大时原子重写一次，摊销后每次追加仍是 O(1)。
+    if (statSync(path).size > 1024 * 1024) {
+      const temp = `${path}.${randomUUID()}.tmp`
+      writeFileSync(temp, [...this.calls(sessionId)].map((id) => JSON.stringify(id)).join('\n') + '\n', { mode: 0o600, flag: 'wx' }); renameSync(temp, path)
+    }
+  }
 }

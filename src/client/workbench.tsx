@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react'
 import type { ClientContext, WorkspaceView, TerminalView, HostTarget, HostFolder, JumpProfile, PollResult } from '../shared/types'
-import { rpc, download, timestamp, mergeFrames } from './api'
+import { rpc, download, timestamp, mergeFrames, progressElapsed } from './api'
 import { TerminalScreen } from './terminal'
 import { HostEditor, JumpEditor, FolderEditor, Modal } from './forms'
 import { FolderTree } from './folders'
@@ -66,6 +66,10 @@ export function Workbench({ ctx, sessionId, visible = true, onClose }: { ctx: Cl
   const trustTerminal = workspace.terminals.find((t) => t.trust), trustParameters = trustTerminal ? { terminalId: trustTerminal.id, generation: trustTerminal.generation } : {}
   const targetText = (terminal: TerminalView) => terminal.target.source === 'local' ? terminal.target.label : `${terminal.target.username ?? ''}@${terminal.target.host ?? terminal.target.label}${terminal.target.port ? `:${terminal.target.port}` : ''}`
   const parameters = current ? { terminalId: current.id, generation: current.generation } : {}
+  // 执行中的操作记录或连接起点给出已用时；超过 2 秒才显示（issue #3 期望 2）。
+  const startedAt = current ? workspace.operations.filter((record) => record.status === 'executing' && record.terminalId === current.id).at(-1)?.startedAt
+    ?? (current.state === 'connecting' ? current.createdAt : undefined) : undefined
+  const progress = progressElapsed(startedAt)
   const profile = catalog?.jumpservers?.find((p: any) => p.id === instanceId)
   useEffect(() => {
     if (source !== 'jumpserver' || !instanceId) return
@@ -97,7 +101,7 @@ export function Workbench({ ctx, sessionId, visible = true, onClose }: { ctx: Cl
           <button aria-label={`关闭终端 ${terminal.target.label}`} onClick={() => setConfirm({ text: `关闭「${terminal.target.label}」的终端连接？`, act: () => { void action('close', { terminalId: terminal.id }); setConfirm(undefined) } })}>×</button></div>)}
           </nav>
           <div className="zt-terminal-controls"><button disabled={!workspace.capabilities.local || actionBusy} title={workspace.capabilities.local ? '每次点击新开一个终端，运行在 DSH 所在的机器上' : `请在 ${PRODUCT_NAME} 设置中启用本地终端并保存`} onClick={() => void connect({ kind: 'local' })}>打开本机终端</button><button title="操作记录" onClick={() => setShowRecords(!showRecords)}>记录</button>{listHidden && <button title="显示机器列表" aria-expanded={false} onClick={() => setListHidden(false)}>机器列表</button>}{onClose && <button aria-label={`收起 ${PRODUCT_NAME}`} onClick={onClose}>×</button>}</div></div>
-        {current ? <><div className="zt-terminal-toolbar"><div className="zt-target" title={targetText(current)}>{targetText(current)}<span>{status[current.state]}{current.busy ? ' · AI 执行中' : ''}</span></div>
+        {current ? <><div className="zt-terminal-toolbar"><div className="zt-target" title={targetText(current)}>{targetText(current)}<span>{status[current.state]}{current.busy ? ' · AI 执行中' : ''}{progress ? ` · ${progress}` : ''}</span></div>
           <div className="zt-actions"><button disabled={actionBusy || current.state !== 'ready' || !current.agentReady || current.uncertain} onClick={() => void action('bind', parameters)}>{currentBound ? '已绑定 AI' : '绑定 AI'}</button>
             <label className={`zt-mode ${currentBound && bound.mode === 'readwrite' ? 'write' : ''}`} title="未勾选：读模式，AI 仅可使用内置查询工具；勾选：读写模式，AI 可执行已授权的命令。"><input type="checkbox" aria-label="允许AI写操作" checked={Boolean(currentBound && bound.mode === 'readwrite')}
               disabled={!currentBound || actionBusy || !current.agentReady || current.uncertain} onChange={(e) => void action('mode', { ...parameters, mode: e.target.checked ? 'readwrite' : 'read' })} />允许AI写操作</label>

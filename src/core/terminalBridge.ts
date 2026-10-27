@@ -366,7 +366,10 @@ export class TerminalBridge {
       }
       const onData = (raw: Buffer | string): void => {
         capture += typeof raw === 'string' ? raw : decoder.decode(raw, { stream: true })
-        if (receiver && receiverPattern && !dispatched && receiverPattern.test(stripVTControlCharacters(capture))) {
+        // ANSI 清洗每事件只做一遍；仅在捕获被改写（起始标记后切片或截断）时
+        // 重新对齐。旧实现同片最多清洗三遍，重输出下是可观的事件循环成本。
+        let clean = stripVTControlCharacters(capture)
+        if (receiver && receiverPattern && !dispatched && receiverPattern.test(clean)) {
           dispatched = true
           // 接收器握手也是异步边界，执行数据发送前再次检查权限。
           if (signal?.aborted || receiver.authorize && !receiver.authorize()) { finish('aborted'); return }
@@ -375,19 +378,20 @@ export class TerminalBridge {
           if (settled) return
         }
         if (!started && startPattern && (!receiver || dispatched)) {
-          const clean = stripVTControlCharacters(capture)
           const start = startPattern.exec(clean)
           if (start) {
             capture = clean.slice(start.index + start[0].length)
+            clean = stripVTControlCharacters(capture)
             started = true
           }
         }
         if (capture.length > CAPTURE_LIMIT) {
           capture = capture.slice(-CAPTURE_LIMIT)
+          clean = stripVTControlCharacters(capture)
           truncated ||= started
         }
         if (!started) return
-        const match = pattern.exec(stripVTControlCharacters(capture))
+        const match = pattern.exec(clean)
         if (match) finish('verified', withExitCode ? Number(match[1].replace(/[\r\n]/g, '')) : undefined, match.index)
       }
       const onDisconnect = (): void => finish('disconnected')
