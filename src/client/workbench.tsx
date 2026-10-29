@@ -5,7 +5,7 @@ import { TerminalScreen } from './terminal'
 import { HostEditor, JumpEditor, FolderEditor, Modal } from './forms'
 import { FolderTree } from './folders'
 import { JumpTree } from './jump-tree'
-import { TreePane } from './tree-pane'
+import { AssetTreeCache } from './asset-tree-cache'
 import { savedNumber, saveNumber, useDrag } from './preferences'
 import { PRODUCT_NAME } from '../shared/branding'
 
@@ -13,17 +13,23 @@ const EMPTY: WorkspaceView = { terminals: [], operations: [], revision: 0, capab
 const status: Record<string, string> = { connecting: '连接中', ready: '已连接', disconnected: '已断开', error: '连接失败', executing: '执行中', completed: '完成', failed: '失败', unknown: '结果不明', blocked: '已拒绝', not_sent: '未下发' }
 export const pageId = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `page-${Date.now()}-${Math.random()}`
 export function Workbench({ ctx, sessionId, visible = true, onClose }: { ctx: ClientContext; sessionId: string; visible?: boolean; onClose?: () => void }) {
+  const [treeCache] = useState(() => new AssetTreeCache(sessionId))
   const [workspace, setWorkspace] = useState<WorkspaceView>(EMPTY), [buffers, setBuffers] = useState<Map<string, TerminalBuffer>>(new Map()), [active, setActive] = useState('')
-  const [error, setError] = useState(''), [catalog, setCatalog] = useState<any>(), [query, setQuery] = useState(''), [offset, setOffset] = useState(0), [folder, setFolder] = useState('')
-  const [source, setSource] = useState<'ssh' | 'jumpserver'>('ssh'), [hostEditor, setHostEditor] = useState<HostTarget | null | false>(false), [jumpEditor, setJumpEditor] = useState<JumpProfile | null | false>(false), [folderEditor, setFolderEditor] = useState<HostFolder | null | false>(false)
-  const [instanceId, setInstanceId] = useState(''), [nodeId, setNodeId] = useState(''), [nodes, setNodes] = useState<any[]>([]), [assets, setAssets] = useState<any>(), [accounts, setAccounts] = useState<any>(), [asset, setAsset] = useState<any>()
+  const [error, setError] = useState(''), [catalog, setCatalog] = useState<any>(treeCache.catalog), [catalogError, setCatalogError] = useState(''), [query, setQuery] = useState(''), [treeQuery, setTreeQuery] = useState(''), [folder, setFolder] = useState(treeCache.preferences.folder)
+  const [source, setSource] = useState<'ssh' | 'jumpserver'>(treeCache.preferences.source), [hostEditor, setHostEditor] = useState<HostTarget | null | false>(false), [jumpEditor, setJumpEditor] = useState<JumpProfile | null | false>(false), [folderEditor, setFolderEditor] = useState<HostFolder | null | false>(false)
+  const [instanceId, setInstanceId] = useState(treeCache.preferences.instanceId), [accounts, setAccounts] = useState<any>(), [asset, setAsset] = useState<any>()
+  const hostTree = treeCache.host, jumpTrees = treeCache.jumps
+  if (instanceId) treeCache.jump(instanceId)
   const [showRecords, setShowRecords] = useState(false), [listHidden, setListHidden] = useState(false), [listWidth, setListWidth] = useState(() => savedNumber('dsh-zterm.list-width', 240, 180, 440))
   const [actionBusy, setActionBusy] = useState(false), [saved, setSaved] = useState(false), [confirm, setConfirm] = useState<{ text: string; act: () => void }>()
-  const alive = useRef(true), visibleRef = useRef(visible), cursor = useRef(-1), pollRefresh = useRef<() => Promise<void>>(async () => {}), activeRef = useRef(active), catalogRequest = useRef(0), accountRequest = useRef(0)
+  const alive = useRef(true), visibleRef = useRef(visible), cursor = useRef(-1), pollRefresh = useRef<() => Promise<void>>(async () => {}), activeRef = useRef(active), catalogRequest = useRef(0), accountRequest = useRef(0), editRequest = useRef(0)
   const tabsRef = useRef<HTMLElement>(null), activeTabRef = useRef<HTMLDivElement>(null)
   const startDrag = useDrag()
   visibleRef.current = visible; activeRef.current = active
   const fail = useCallback((message: string) => setError(message), [])
+  useEffect(() => { const timer = setTimeout(() => setTreeQuery(query.trim()), 150); return () => clearTimeout(timer) }, [query])
+  useEffect(() => () => treeCache.dispose(), [treeCache])
+  useEffect(() => { treeCache.preferences = { source, instanceId, folder }; treeCache.schedule() }, [treeCache, source, instanceId, folder])
   useEffect(() => {
     alive.current = true; setWorkspace(EMPTY); setBuffers(new Map()); cursor.current = -1
     let cancelled = false, attached = false, timer: ReturnType<typeof setTimeout>, inFlight: Promise<void> | undefined; const controller = new AbortController()
@@ -41,14 +47,53 @@ export function Workbench({ ctx, sessionId, visible = true, onClose }: { ctx: Cl
     pollRefresh.current = poll; void loop(); void rpc<any[]>(ctx, 'saved-workspace', { sessionId }).then((targets) => { if (!cancelled) setSaved(targets.length > 0) }).catch(() => {})
     return () => { cancelled = true; alive.current = false; clearTimeout(timer); controller.abort() }
   }, [ctx, sessionId])
-  const loadCatalog = useCallback(async (signal?: AbortSignal) => {
+  const loadCatalog = useCallback(async (signal?: AbortSignal, refreshTrees = true) => {
     const request = ++catalogRequest.current
-    const result = await rpc(ctx, 'catalog', { query, offset, folderId: folder || undefined }, signal)
+    if (refreshTrees) { hostTree.invalidate(); jumpTrees.forEach((tree) => tree.invalidate()) }
+    const result = await rpc(ctx, 'catalog', { folderId: 'root' }, signal)
     if (signal?.aborted || request !== catalogRequest.current || !alive.current) return
-    setCatalog(result); if (!instanceId && result.jumpservers.length) setInstanceId(result.jumpservers[0].id)
-  }, [ctx, query, offset, folder, instanceId])
-  useEffect(() => { const controller = new AbortController(); const timer = setTimeout(() => { void loadCatalog(controller.signal).catch((e) => { if (!controller.signal.aborted) fail(e.message) }) }, 150)
-    return () => { clearTimeout(timer); controller.abort() } }, [loadCatalog, fail, workspace.catalogRevision])
+    const changed = treeCache.catalog && treeCache.catalog.revision !== result.revision
+    if (changed) hostTree.invalidate()
+    hostTree.retain(new Set(['', ...result.folders.map((item: HostFolder) => item.id)]))
+    hostTree.seed('hosts:', { items: result.hosts, total: result.total, hasMore: result.total > 200 })
+    jumpTrees.forEach((tree, id) => { if (result.jumpservers.some((item: JumpProfile) => item.id === id)) { if (changed) tree.invalidate() } else { tree.dispose(); jumpTrees.delete(id) } })
+    treeCache.catalog = result; treeCache.schedule(); setCatalogError('')
+    setCatalog(result); setFolder((previous) => result.folders.some((item: HostFolder) => item.id === previous) ? previous : '')
+    setInstanceId((previous) => result.jumpservers.some((item: JumpProfile) => item.id === previous) ? previous : result.jumpservers[0]?.id ?? '')
+    return result
+  }, [ctx, hostTree, jumpTrees, treeCache])
+  const wasShown = useRef(visible && !listHidden)
+  useEffect(() => {
+    const shown = visible && !listHidden
+    if (shown && !wasShown.current) { hostTree.invalidate(); jumpTrees.forEach((tree) => tree.invalidate()) }
+    wasShown.current = shown
+  }, [visible, listHidden, hostTree, jumpTrees])
+  useEffect(() => {
+    if (!visible || listHidden) return
+    const controller = new AbortController()
+    void loadCatalog(controller.signal, false).catch((e) => { if (!controller.signal.aborted) setCatalogError(e.message) })
+    return () => controller.abort()
+  }, [loadCatalog, visible, listHidden, workspace.catalogRevision])
+  const edit = async (kind: 'host' | 'folder' | 'jump', item?: { id: string }) => {
+    const request = ++editRequest.current
+    setActionBusy(true)
+    try {
+      const fresh = await loadCatalog(undefined, false)
+      if (!fresh || request !== editRequest.current || !alive.current) return
+      if (kind === 'host') {
+        const host = item ? (await rpc(ctx, 'catalog', { targetId: item.id })).hosts.find((row: HostTarget) => row.id === item.id) : null
+        if (request !== editRequest.current || !alive.current) return
+        if (item && !host) throw new Error('主机已移除，请刷新列表')
+        setHostEditor(host)
+      } else {
+        const row = item ? fresh[kind === 'folder' ? 'folders' : 'jumpservers'].find((entry: { id: string }) => entry.id === item.id) : null
+        if (item && !row) throw new Error('配置已移除，请刷新列表')
+        kind === 'folder' ? setFolderEditor(row) : setJumpEditor(row)
+      }
+    } catch (e) { if (alive.current && request === editRequest.current) fail((e as Error).message) }
+    finally { if (alive.current && request === editRequest.current) setActionBusy(false) }
+  }
+  const closeEditors = () => { editRequest.current++; setActionBusy(false); setHostEditor(false); setJumpEditor(false); setFolderEditor(false) }
   const action = useCallback(async (method: string, payload: any = {}) => {
     setActionBusy(true); setError('')
     try { const value = await rpc(ctx, method, { sessionId, pageId, ...payload }); if (alive.current) { await pollRefresh.current(); return value } }
@@ -71,20 +116,11 @@ export function Workbench({ ctx, sessionId, visible = true, onClose }: { ctx: Cl
     ?? (current.state === 'connecting' ? current.createdAt : undefined) : undefined
   const progress = progressElapsed(startedAt)
   const profile = catalog?.jumpservers?.find((p: any) => p.id === instanceId)
-  useEffect(() => {
-    if (source !== 'jumpserver' || !instanceId) return
-    let active = true; setNodes([])
-    void rpc(ctx, 'jump/query', { instanceId, operation: 'nodes' }).then((value) => { if (active) setNodes(value.nodes ?? []) }).catch((e) => { if (active) fail(e.message) })
-    return () => { active = false }
-  }, [ctx, instanceId, source, fail])
-  useEffect(() => {
-    if (source !== 'jumpserver' || !instanceId) return
-    let active = true; setAssets(undefined); const timer = setTimeout(() => {
-      void rpc(ctx, 'jump/query', { instanceId, operation: 'assets', nodeId: nodeId || undefined, query, offset, limit: 100 })
-        .then((value) => { if (active) setAssets(value) }).catch((e) => { if (active) fail(e.message) })
-    }, 200)
-    return () => { active = false; clearTimeout(timer) }
-  }, [ctx, instanceId, nodeId, query, offset, source, fail])
+  const revealFolder = (id = '') => {
+    const path = [''], seen = new Set<string>(), folders = new Map<string, HostFolder>((catalog?.folders ?? []).map((item: HostFolder) => [item.id, item]))
+    while (id && !seen.has(id)) { seen.add(id); path.push(id); id = folders.get(id)?.parentId ?? '' }
+    hostTree.reveal(path)
+  }
   useEffect(() => { accountRequest.current++; setAccounts(undefined) }, [instanceId, source])
   const chooseAsset = async (value: any) => { const request = ++accountRequest.current; setAsset(value); setAccounts(undefined); try { const result = await rpc(ctx, 'jump/query', { instanceId, operation: 'accounts', assetId: value.assetId }); if (request === accountRequest.current && alive.current) setAccounts(result.accounts) } catch (e) { if (request === accountRequest.current && alive.current) fail((e as Error).message) } }
   const resizeList = (event: React.MouseEvent) => {
@@ -113,7 +149,7 @@ export function Workbench({ ctx, sessionId, visible = true, onClose }: { ctx: Cl
           {current.error && <div className="zt-notice danger">{current.error}</div>}
         </> : <div className="zt-empty"><div className="zt-terminal-mark">&gt;_</div><h3>连接一台机器</h3><p>从右侧选择主机或 JumpServer 资产。<br />连接后可手工操作，或绑定给当前 DSH 对话中的 AI。</p>
           {workspace.capabilities.automatic && <p>也可在对话中指定主机名或 IP，AI 会先查远程主机，再查 JumpServer，最后使用默认 SSH 私钥。</p>}
-          <button className="zt-primary" onClick={() => setHostEditor(null)}>添加远程主机</button>{saved && <button onClick={() => void action('restore')}>恢复上次终端列表（默认只读）</button>}</div>}
+          <button className="zt-primary" disabled={actionBusy} onClick={() => void edit('host')}>添加远程主机</button>{saved && <button onClick={() => void action('restore')}>恢复上次终端列表（默认只读）</button>}</div>}
         <div className="zt-screens">{workspace.terminals.map((terminal) => <TerminalScreen key={`${terminal.id}:${terminal.generation}`} ctx={ctx} sessionId={sessionId} terminal={terminal} buffer={buffers.get(terminal.id)} visible={visible && terminal.id === active} onError={fail} />)}</div>
         <footer className="zt-statusbar"><div className="zt-status-info"><span>{bound ? `AI 绑定：${workspace.terminals.find((t) => t.id === bound.terminalId)?.target.label ?? bound.terminalId} · ${bound.mode === 'readwrite' ? `读写 ${bound.writeCalls}/${bound.maxWriteCalls}` : '只读'}` : 'AI 尚未绑定终端'}</span>
           <span className="zt-host-platform" title="终端连接与命令从 DSH 宿主发起">DSH 宿主 · {workspace.hostPlatform || '正在连接'}</span></div>
@@ -124,29 +160,26 @@ export function Workbench({ ctx, sessionId, visible = true, onClose }: { ctx: Cl
             <p className="zt-hint">{record.target.label} · 退出码 {record.exitCode ?? '未知'} · {record.completion ?? '未核验'}{record.truncated ? ' · 记录已截断' : ''}</p><pre>{record.error || record.output || '（无输出）'}</pre></details>)}</div>}
       </main>
       {!listHidden && <><div className="zt-list-handle" role="separator" aria-label="调整机器列表宽度" aria-orientation="vertical" onMouseDown={resizeList} />
-        <aside className="zt-hosts" style={{ width: listWidth }}><div className="zt-list-header"><strong>主机与资产</strong><div className="zt-list-header-actions"><button aria-label="刷新机器列表" title="刷新机器列表" onClick={() => void loadCatalog().catch((e) => fail(e.message))}>↻</button><button title="收起机器列表" aria-expanded={true} onClick={() => setListHidden(true)}>收起列表</button></div></div>
-          <div className="zt-source-tabs"><button className={source === 'ssh' ? 'active' : ''} onClick={() => { setSource('ssh'); setOffset(0); setQuery('') }}>远程主机</button><button className={source === 'jumpserver' ? 'active' : ''} onClick={() => { setSource('jumpserver'); setOffset(0); setQuery('') }}>JumpServer</button></div>
-          <input className="zt-list-search" aria-label="搜索主机或资产" placeholder="搜索名称或地址" value={query} onChange={(e) => { setQuery(e.target.value); setOffset(0) }} />
-          {source === 'ssh' ? <><div className="zt-list-actions"><button onClick={() => setHostEditor(null)}>＋ 主机</button><button onClick={() => setFolderEditor(null)}>＋ 文件夹</button>
+        <aside className="zt-hosts" style={{ width: listWidth }}><div className="zt-list-header"><strong>主机与资产</strong><div className="zt-list-header-actions"><button aria-label="刷新机器列表" title="刷新机器列表" onClick={() => void loadCatalog().catch((e) => setCatalogError(e.message))}>↻</button><button title="收起机器列表" aria-expanded={true} onClick={() => setListHidden(true)}>收起列表</button></div></div>
+          {catalogError && <div className="zt-tree-message" role="status"><span title={catalogError}>{catalog ? '更新失败，当前显示缓存' : '目录加载失败'}</span><button onClick={() => void loadCatalog().catch((e) => setCatalogError(e.message))}>重试</button></div>}
+          <div className="zt-source-tabs"><button className={source === 'ssh' ? 'active' : ''} onClick={() => { setSource('ssh'); setQuery(''); setTreeQuery('') }}>远程主机</button><button className={source === 'jumpserver' ? 'active' : ''} onClick={() => { setSource('jumpserver'); setQuery(''); setTreeQuery('') }}>JumpServer</button></div>
+          <input className="zt-list-search" aria-label="搜索主机或资产" placeholder="搜索名称或地址" value={query} onChange={(e) => setQuery(e.target.value)} />
+          {source === 'ssh' ? <><div className="zt-list-actions"><button disabled={actionBusy} onClick={() => void edit('host')}>＋ 主机</button><button disabled={actionBusy} onClick={() => void edit('folder')}>＋ 文件夹</button>
             <button onClick={() => void rpc(ctx, 'hosts/export').then((text) => download(`zterm-${timestamp()}-ssh-config`, text)).catch((e) => fail(e.message))}>导出</button></div>
-            <div className="zt-host-browser"><TreePane key="folders" label="调整主机文件夹高度" storageKey="dsh-zterm.folder-tree-height"><FolderTree folders={catalog?.folders ?? []} selected={folder} onSelect={(id) => { setFolder(id); setOffset(0) }} onEdit={setFolderEditor}
-              onDelete={(target) => setConfirm({ text: `删除文件夹「${target.label}」？文件夹必须为空。`, act: () => { void rpc(ctx, 'folder/delete', { id: target.id, revision: catalog?.revision }).then(() => { if (folder === target.id) setFolder(''); return loadCatalog() }).catch((e) => fail(e.message)); setConfirm(undefined) } })} /></TreePane>
-            <div className="zt-host-list">{catalog?.hosts.map((host: HostTarget) => <div className="zt-host-row" key={host.id}><button className="zt-host-connect" disabled={actionBusy} onClick={() => void connect({ targetId: host.id })} title={`连接 ${host.username}@${host.host}:${host.port}`}><span className="zt-host-glyph">▤</span><span><strong>{host.label}</strong><small>{host.username}@{host.host}</small></span></button>
-              <button title="编辑主机" onClick={() => setHostEditor(host)}>⋯</button><button title="移除主机配置" onClick={() => setConfirm({ text: `移除「${host.label}」的配置？已有终端连接保持原目标。`, act: () => { void rpc(ctx, 'host/delete', { id: host.id, revision: catalog.revision }).then(() => loadCatalog()).catch((e) => fail(e.message)); setConfirm(undefined) } })}>×</button></div>)}
-              {!catalog?.hosts.length && <p className="zt-list-empty">{query ? '没有匹配的主机' : '添加主机后从这里连接'}</p>}</div></div>
-            <div className="zt-pagination"><span>{catalog?.total ?? 0} 台{catalog?.total ? ` · 当前 ${offset + 1}–${Math.min(offset + 200, catalog.total)}` : ''}</span><button disabled={!offset} onClick={() => setOffset(Math.max(0, offset - 200))}>‹</button><button disabled={offset + 200 >= (catalog?.total ?? 0)} onClick={() => setOffset(offset + 200)}>›</button></div>
-          </> : <><div className="zt-list-actions"><button onClick={() => setJumpEditor(null)}>＋ 实例</button>{profile && <button onClick={() => setJumpEditor(profile)}>编辑</button>}{profile && <button onClick={() => setConfirm({ text: `移除「${profile.label}」的配置？`, act: () => { void rpc(ctx, 'jump/delete', { id: instanceId, revision: catalog.revision }).then(() => { setInstanceId(''); void loadCatalog() }).catch((e) => fail(e.message)); setConfirm(undefined) } })}>移除</button>}</div>
-            <select aria-label="JumpServer 实例" value={instanceId} onChange={(e) => { setInstanceId(e.target.value); setNodeId(''); setOffset(0) }}><option value="">选择实例</option>{catalog?.jumpservers.map((p: any) => <option key={p.id} value={p.id}>{p.label}</option>)}</select>
-            <div className="zt-host-browser">{instanceId && <TreePane key="jumpserver" label="调整 JumpServer 资产节点高度" storageKey="dsh-zterm.jump-tree-height"><JumpTree key={instanceId} ctx={ctx} instanceId={instanceId} nodes={nodes} selected={nodeId} onSelect={(id) => { setNodeId(id); setOffset(0) }} onError={fail} /></TreePane>}
-            <div className="zt-host-list">{assets?.assets?.map((item: any) => <button className="zt-asset-row" key={item.assetId} onClick={() => void chooseAsset(item)}><strong>{item.name}</strong><small>{item.address} · {item.platform}</small></button>)}
-              {!instanceId && <p className="zt-list-empty">先添加 JumpServer 实例</p>}</div></div>
-            <div className="zt-pagination"><span>{assets?.total ?? 0} 台</span><button disabled={!offset} onClick={() => setOffset(Math.max(0, offset - 100))}>‹</button><button disabled={!assets?.hasMore} onClick={() => setOffset(offset + 100)}>›</button></div>
+            <div className="zt-host-browser">{catalog ? <FolderTree ctx={ctx} state={hostTree} folders={catalog.folders} query={treeQuery} selected={folder} busy={actionBusy} onSelect={setFolder} onEdit={(item) => void edit('folder', item)}
+              onConnect={(host) => void connect({ targetId: host.id })} onHostEdit={(host) => void edit('host', host)}
+              onHostDelete={(host) => setConfirm({ text: `移除「${host.label}」的配置？已有终端连接保持原目标。`, act: () => { void rpc(ctx, 'host/delete', { id: host.id, revision: catalog.revision }).then(() => loadCatalog()).catch((e) => fail(e.message)); setConfirm(undefined) } })}
+              onDelete={(target) => setConfirm({ text: `删除文件夹「${target.label}」？文件夹必须为空。`, act: () => { void rpc(ctx, 'folder/delete', { id: target.id, revision: catalog.revision }).then(() => loadCatalog()).catch((e) => fail(e.message)); setConfirm(undefined) } })} /> : <p className="zt-tree-message" role="status">正在加载主机目录…</p>}</div>
+          </> : <><div className="zt-list-actions"><button disabled={actionBusy} onClick={() => void edit('jump')}>＋ 实例</button>{profile && <button disabled={actionBusy} onClick={() => void edit('jump', profile)}>编辑</button>}{profile && <button onClick={() => setConfirm({ text: `移除「${profile.label}」的配置？`, act: () => { void rpc(ctx, 'jump/delete', { id: instanceId, revision: catalog.revision }).then(() => { setInstanceId(''); void loadCatalog() }).catch((e) => fail(e.message)); setConfirm(undefined) } })}>移除</button>}</div>
+            <select aria-label="JumpServer 实例" value={instanceId} onChange={(e) => { setInstanceId(e.target.value); setQuery(''); setTreeQuery('') }}><option value="">选择实例</option>{catalog?.jumpservers.map((p: any) => <option key={p.id} value={p.id}>{p.label}</option>)}</select>
+            <div className="zt-host-browser">{instanceId ? <JumpTree key={instanceId} ctx={ctx} instanceId={instanceId} state={jumpTrees.get(instanceId)!} query={treeQuery} onChoose={(item) => void chooseAsset(item)} />
+              : <p className="zt-list-empty">{catalog?.jumpservers.length ? '请选择 JumpServer 实例' : '先添加 JumpServer 实例'}</p>}</div>
           </>}
         </aside></>}
     </div>
-    {hostEditor !== false && <HostEditor ctx={ctx} host={hostEditor ?? undefined} folders={catalog?.folders ?? []} credentials={catalog?.credentials ?? []} defaultCredentialId={catalog?.defaultCredentialId} revision={catalog?.revision} onClose={() => setHostEditor(false)} onSaved={() => void loadCatalog()} />}
-    {jumpEditor !== false && <JumpEditor ctx={ctx} profile={jumpEditor ?? undefined} revision={catalog?.revision} onClose={() => setJumpEditor(false)} onSaved={() => void loadCatalog()} />}
-    {folderEditor !== false && <FolderEditor ctx={ctx} folder={folderEditor ?? undefined} folders={catalog?.folders ?? []} revision={catalog?.revision} onClose={() => setFolderEditor(false)} onSaved={() => void loadCatalog()} />}
+    {hostEditor !== false && <HostEditor key={hostEditor?.id ?? 'new'} ctx={ctx} host={hostEditor ?? undefined} defaultFolderId={folder} folders={catalog?.folders ?? []} credentials={catalog?.credentials ?? []} defaultCredentialId={catalog?.defaultCredentialId} revision={catalog?.revision} onClose={closeEditors} onSaved={(id) => { revealFolder(id); void loadCatalog().catch((e) => fail(e.message)) }} />}
+    {jumpEditor !== false && <JumpEditor key={jumpEditor?.id ?? 'new'} ctx={ctx} profile={jumpEditor ?? undefined} revision={catalog?.revision} onClose={closeEditors} onSaved={() => void loadCatalog()} />}
+    {folderEditor !== false && <FolderEditor key={folderEditor?.id ?? 'new'} ctx={ctx} folder={folderEditor ?? undefined} defaultParentId={folder} folders={catalog?.folders ?? []} revision={catalog?.revision} onClose={closeEditors} onSaved={(id) => { revealFolder(id); void loadCatalog().catch((e) => fail(e.message)) }} />}
     {accounts && <Modal title={`选择账号 · ${asset?.name ?? ''}`} onClose={() => setAccounts(undefined)}><div className="zt-account-list">{accounts.map((account: any) => <button key={account.accountId} disabled={!account.canConnect || actionBusy} onClick={() => { void connect({ kind: 'jumpserver', instanceId, assetId: asset.assetId, accountId: account.accountId, label: asset.name, accountName: account.name || account.username }); setAccounts(undefined) }}><strong>{account.name}</strong><span>{account.username}{!account.canConnect ? ' · 无连接权限' : ''}</span></button>)}{!accounts.length && <p>没有可用账号</p>}</div></Modal>}
     {visible && trustTerminal?.trust && <Modal title={trustTerminal.trust.kind === 'changed' ? 'SSH 主机指纹已变更' : '核实 SSH 主机身份'} onClose={() => { void action('disconnect', trustParameters) }}>
       <div className="zt-trust"><p>{trustTerminal.target.label} · {trustTerminal.trust.username}@{trustTerminal.trust.host}:{trustTerminal.trust.port}</p><pre>{trustTerminal.trust.algorithm}{'\n'}{trustTerminal.trust.fingerprint}</pre>{trustTerminal.trust.trustedFingerprint && <p>原指纹：{trustTerminal.trust.trustedFingerprint}</p>}

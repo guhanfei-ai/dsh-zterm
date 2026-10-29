@@ -9,6 +9,8 @@ const localEnabled = new URLSearchParams(location.search).get('local') !== '0'
 const connecting = new URLSearchParams(location.search).get('connecting') === '1', resizes: any[] = []
 const legacyTab = new URLSearchParams(location.search).get('legacy') === '1', calls = new Map<string, number>()
 const largeTree = new URLSearchParams(location.search).get('tree') === 'large'
+const treeMode = new URLSearchParams(location.search).get('tree'), treeRequests: any[] = [], treeDelays = new Map<string, number>(), treeFailures = new Set<string>()
+let jumpChildrenRemoved = false
 let tab: any, open = false, activeType = 'zterm'
 let openedTab: any, titleUpdates = 0
 const notify = () => listeners.forEach((listener) => listener())
@@ -19,6 +21,39 @@ w.__ztermFixture = { resizes, snapshot: () => ({ terminals: state.terminals.map(
 const catalog: any = { hosts: Array.from({ length: 8 }, (_, i) => ({ id: `host-${i}`, label: i < 3 ? `应用服务 0${i + 1}` : i < 5 ? `数据库 0${i - 2}` : `缓存节点 0${i - 4}`, kind: 'ssh', host: `192.0.2.${21 + i}`, port: 22, username: 'operator', authType: 'password', credentialRef: `DSH_ZTERM_TEST_${i}`, folderId: i < 3 ? 'apps' : undefined })), folders: [{ id: 'apps', label: '应用服务' }], jumpservers: [{ id: 'jump-1', label: '测试堡垒机', baseUrl: 'https://jump.example.invalid', authMode: 'token', credentialRef: 'DSH_ZTERM_TEST_JUMP', verifyTls: true }], total: 8, revision: 1,
   credentials: [], defaultCredentialId: '', allowLocalTerminal: localEnabled, allowExternalTargets: false, temporarilyDisabled: false, defaultPanelWidth: 60, maxSessions: 12, maxWriteCalls: 100, commandTimeoutMs: 30000, credentialsConfigured: {} }
 if (largeTree) catalog.folders.push(...Array.from({ length: 30 }, (_, i) => ({ id: `folder-${i}`, label: `测试文件夹 ${i + 1}` })))
+if (treeMode === 'root') { catalog.folders = []; catalog.hosts = catalog.hosts.slice(0, 4).map((host: any, index: number) => ({ ...host, label: `根目录机器 ${index + 1}`, folderId: undefined })) }
+if (treeMode === 'unified' || largeTree) {
+  catalog.folders = [{ id: 'prod', label: '生产环境' }, { id: 'apps', label: '应用服务', parentId: 'prod' }, { id: 'db', label: '数据库', parentId: 'prod' }, { id: 'empty', label: '空目录' }, ...catalog.folders.filter((folder: any) => folder.id !== 'apps')]
+  catalog.hosts = largeTree ? Array.from({ length: 20000 }, (_, i) => ({ ...catalog.hosts[0], id: `host-${i}`, label: i < 450 ? `应用服务 ${i + 1}` : i < 800 ? `数据库 ${i - 449}` : `根目录机器 ${i - 799}`, host: `192.0.2.${i % 200 + 1}`, folderId: i < 450 ? 'apps' : i < 800 ? 'db' : undefined }))
+    : catalog.hosts.map((host: any, index: number) => ({ ...host, folderId: index < 3 ? 'apps' : index < 5 ? 'db' : undefined }))
+  catalog.jumpservers.push({ ...catalog.jumpservers[0], id: 'jump-2', label: '第二测试堡垒机' })
+}
+const jumpAsset = (id: string, name: string) => ({ assetId: id, name, address: '192.0.2.31', platform: 'Linux' })
+const jumpGroups: Record<string, any[]> = {
+  'n-prod': [jumpAsset('shared', '共享资产')],
+  'n-app': Array.from({ length: largeTree ? 205 : 3 }, (_, index) => jumpAsset(`app-${index}`, `应用资产 ${index + 1}`)),
+  'n-leaf': [jumpAsset('shared', '共享资产'), ...Array.from({ length: largeTree ? 120 : 2 }, (_, index) => jumpAsset(`leaf-${index}`, `叶子资产 ${index + 1}`))],
+  'n-empty': [], 'n-deep': [jumpAsset('deep', '深层资产')],
+}
+const allJumpAssets = [...new Map(Object.values(jumpGroups).flat().map((item) => [item.assetId, item])).values(), ...(largeTree ? Array.from({ length: 20000 }, (_, i) => jumpAsset(`global-${i}`, `全局资产 ${i + 1}`)) : [])]
+const jumpQuery = (payload: any) => {
+  const prefix = payload.instanceId === 'jump-2' ? '第二实例 · ' : ''
+  if (payload.operation === 'accounts') return { accounts: [{ accountId: 'a', name: '运维账号', username: 'operator', canConnect: true }] }
+  if (payload.operation === 'nodes') return { nodes: (payload.parentKey === '1:0' ? [{ nodeId: 'n-app', key: '1:0:0', name: '应用资产目录', hasChildren: true, assetCount: jumpGroups['n-app'].length }]
+    : payload.parentKey === '1:0:0' ? [{ nodeId: 'n-deep', key: '1:0:0:0', name: '深层目录', hasChildren: false, assetCount: 1 }]
+    : payload.parentKey ? [] : [{ nodeId: 'n-prod', key: '1:0', name: '生产资产', hasChildren: !jumpChildrenRemoved, assetCount: 1 }, { nodeId: 'n-leaf', key: '1:1', name: '叶子目录', hasChildren: false, assetCount: jumpGroups['n-leaf'].length }, { nodeId: 'n-empty', key: '1:2', name: '空资产目录', hasChildren: false, assetCount: 0 }]).filter(() => !payload.parentKey || !jumpChildrenRemoved).map((node) => ({ ...node, name: prefix + node.name })) }
+  const assets = (payload.nodeId ? jumpGroups[payload.nodeId] ?? [] : allJumpAssets).map((item) => ({ ...item, name: prefix + item.name })).filter((item) => `${item.name} ${item.address}`.toLowerCase().includes((payload.query ?? '').toLowerCase()))
+  const offset = payload.offset ?? 0, limit = payload.limit ?? 100, slice = assets.slice(offset, offset + limit)
+  return { assets: payload.nodeId === 'n-app' && slice.length ? [...slice, slice[0]] : slice, total: assets.length, hasMore: offset + limit < assets.length }
+}
+Object.assign(w.__ztermFixture, { treeRequests, delay: (key: string, ms: number) => treeDelays.set(key, ms), failNext: (key: string) => treeFailures.add(key),
+  removeJumpChildren: () => { jumpChildrenRemoved = true },
+  closeWorkbench: () => { open = false; notify() },
+  renameHost: (id: string, label: string) => { catalog.hosts.find((host: any) => host.id === id).label = label; revision++ },
+  renameAsset: (id: string, name: string) => { allJumpAssets.find((asset) => asset.assetId === id).name = name },
+  catalog: () => ({ folders: catalog.folders, hosts: catalog.hosts.map((host: any) => ({ id: host.id, label: host.label, folderId: host.folderId })), revision }),
+  moveHost: (id: string, folderId?: string) => { catalog.hosts.find((host: any) => host.id === id).folderId = folderId; revision++; state.catalogRevision = revision },
+})
 catalog.temporarilyDisabled = new URLSearchParams(location.search).get('disabled') === '1'
 const ctx: any = { effect: (body: any) => body(), inject: (names: string[], body: any) => { if (!names.includes('betterSidebar') || withSidebar) return body(ctx) }, slots: { inject: (_name: any, body: any) => body(), register: (descriptor: any, component: any) => { slots.set(descriptor.name, component); return () => {} } },
   betterSidebar: withSidebar ? { registerTab: (descriptor: any) => { tab = descriptor; return () => {} }, openTab: (seed: any) => { openedTab ??= { id: 'fixture-tab', title: legacyTab ? '终端工作台' : seed.title }; open = true; activeType = 'zterm'; notify() },
@@ -26,7 +61,13 @@ const ctx: any = { effect: (body: any) => body(), inject: (names: string[], body
   connection: { rpc: { call: async (_channel: string, endpoint: string, payload: any) => {
     let value: any = {}; const method = endpoint.slice(6)
     calls.set(method, (calls.get(method) ?? 0) + 1)
-    if (method === 'catalog') { const hosts = catalog.hosts.filter((h: any) => `${h.label} ${h.host}`.includes(payload?.query ?? '') && (!payload?.folderId || (payload.folderId === 'root' ? !h.folderId : h.folderId === payload.folderId))); value = { ...catalog, hosts, total: hosts.length, revision } }
+    if (method === 'catalog' || method === 'jump/query') {
+      const key = method === 'catalog' ? `catalog:${payload.folderId ?? 'search'}` : `jump:${payload.instanceId}:${payload.operation}:${payload.nodeId ?? payload.parentKey ?? 'root'}`
+      treeRequests.push({ key, payload: { ...payload } })
+      if (treeDelays.get(key)) await new Promise((resolve) => setTimeout(resolve, treeDelays.get(key)))
+      if (treeFailures.delete(key)) return { ok: false, error: { message: '虚构目录读取失败' } }
+    }
+    if (method === 'catalog') { const hosts = catalog.hosts.filter((h: any) => (!payload.targetId || h.id === payload.targetId) && `${h.label} ${h.host}`.toLowerCase().includes((payload?.query ?? '').toLowerCase()) && (!payload?.folderId || (payload.folderId === 'root' ? !h.folderId : h.folderId === payload.folderId))); const offset = payload.offset ?? 0; value = { ...catalog, hosts: hosts.slice(offset, offset + 200), total: hosts.length, revision } }
     else if (method === 'poll') value = { workspace: state, reset: true, cursor: seq, output: [], snapshots: state.terminals.map((t: any) => ({ terminalId: t.id, generation: t.generation, text: output })) }
     else if (method === 'status') value = { temporarilyDisabled: Boolean(catalog.temporarilyDisabled) }
     else if (method === 'bind') state.binding = { terminalId: payload.terminalId, generation: payload.generation, mode: 'read', writeCalls: 0, maxWriteCalls: 100 }
@@ -44,6 +85,7 @@ const ctx: any = { effect: (body: any) => body(), inject: (names: string[], body
     }
     else if (method === 'close') { state.terminals = state.terminals.filter((t: any) => t.id !== payload.terminalId); if (state.binding?.terminalId === payload.terminalId) state.binding = undefined }
     else if (method === 'host/save') { const host = { ...payload.host, id: payload.host.id ?? `host-${Date.now()}` }; catalog.hosts = [...catalog.hosts.filter((h: any) => h.id !== host.id), host]; revision++; value = { id: host.id } }
+    else if (method === 'host/delete') { catalog.hosts = catalog.hosts.filter((host: any) => host.id !== payload.id); revision++; value = { deleted: true } }
     else if (method === 'credential/save') {
       const credential = { ...payload.credential, id: payload.credential.id ?? `credential-${Date.now()}`, ...(payload.credential.authType === 'key-file' ? { privateKeyPath: payload.content } : { credentialRef: 'DSH_ZTERM_FIXTURE_CREDENTIAL' }) }
       catalog.credentials = [...catalog.credentials.filter((c: any) => c.id !== credential.id), credential]; revision++; value = { id: credential.id }
@@ -58,8 +100,8 @@ const ctx: any = { effect: (body: any) => body(), inject: (names: string[], body
     else if (method === 'results') value = state.operations
     else if (method === 'saved-workspace') value = []
     else if (method === 'terminal/export') value = output
-    else if (method === 'jump/query') value = payload.operation === 'nodes' ? { nodes: largeTree ? Array.from({ length: 30 }, (_, i) => ({ nodeId: `node-${i}`, key: `1:${i}`, name: `测试资产组 ${i + 1}`, hasChildren: false, assetCount: 24 })) : [{ nodeId: 'n', name: '测试资产', assetCount: 2 }] } : payload.operation === 'accounts' ? { accounts: [{ accountId: 'a', name: '运维账号', username: 'operator', canConnect: true }] } : { assets: largeTree ? Array.from({ length: 24 }, (_, i) => ({ assetId: `asset-${i}`, name: `测试应用主机 ${i + 1}`, address: `192.0.2.${31 + i}`, platform: 'Linux' })) : [{ assetId: 'a1', name: '测试应用主机', address: '192.0.2.31', platform: 'Linux' }], total: largeTree ? 24 : 1, hasMore: false }
-    return { ok: true, value }
+    else if (method === 'jump/query') value = jumpQuery(payload)
+    return { ok: true, value: structuredClone(value) }
   } } } }
 w.__ModuleLoader__ = { load: (bundle: any) => { const plugin = bundle.factory((name: string) => name === 'react' ? React : name === 'react/jsx-runtime' ? jsx : {}); plugin.apply(ctx); render() } }
 const root = createRoot(document.getElementById('fixture')!)

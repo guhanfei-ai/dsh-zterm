@@ -127,6 +127,7 @@ export function createPlugin(ctx: any, entryConfig: any = {}, deps: { dataRoot?:
     if (method === 'catalog') {
       const cfg = config(), query = String(payload.query ?? '').toLowerCase(), offset = Math.max(0, Number(payload.offset) || 0)
       const filtered = cfg.hosts.filter((host) => `${host.label} ${host.host}`.toLowerCase().includes(query)
+        && (!payload.targetId || host.id === payload.targetId)
         && (!payload.folderId || (payload.folderId === 'root' ? !host.folderId : host.folderId === payload.folderId)))
       const hosts = filtered.slice(offset, offset + 200)
       const refs = [...new Set([...hosts.flatMap((h) => [h.credentialRef, h.passphraseRef]), ...cfg.credentials.flatMap((c) => [c.credentialRef, c.passphraseRef]), ...cfg.jumpservers.flatMap((p) => [p.credentialRef, p.accessKeyIdRef])].filter(Boolean) as string[])]

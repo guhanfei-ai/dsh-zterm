@@ -26,10 +26,10 @@ export function Modal({ title, children, onClose }: { title: string; children: R
   </div>
 }
 function Field({ title, children }: { title: string; children: React.ReactNode }) { return <label className="zt-field"><span>{title}</span>{children}</label> }
-export function HostEditor({ ctx, host, folders, credentials = [], defaultCredentialId, revision, onClose, onSaved }: {
-  ctx: ClientContext; host?: HostTarget; folders: HostFolder[]; credentials?: SavedCredential[]; defaultCredentialId?: string; revision?: number; onClose: () => void; onSaved: () => void
+export function HostEditor({ ctx, host, defaultFolderId = '', folders, credentials = [], defaultCredentialId, revision, onClose, onSaved }: {
+  ctx: ClientContext; host?: HostTarget; defaultFolderId?: string; folders: HostFolder[]; credentials?: SavedCredential[]; defaultCredentialId?: string; revision?: number; onClose: () => void; onSaved: (folderId?: string) => void
 }) {
-  const [form, setForm] = useState({ label: host?.label ?? '', host: host?.host ?? '', port: String(host?.port ?? 22), username: host?.username ?? '', authType: host?.authType ?? 'key-file', privateKeyPath: host?.privateKeyPath ?? '', folderId: host?.folderId ?? '' })
+  const [form, setForm] = useState({ label: host?.label ?? '', host: host?.host ?? '', port: String(host?.port ?? 22), username: host?.username ?? '', authType: host?.authType ?? 'key-file', privateKeyPath: host?.privateKeyPath ?? '', folderId: host ? host.folderId ?? '' : defaultFolderId })
   const [secret, setSecret] = useState(''), [phrase, setPhrase] = useState(''), [clearPhrase, setClearPhrase] = useState(false), [error, setError] = useState(''), [busy, setBusy] = useState(false)
   const [authChoice, setAuthChoice] = useState(host?.credentialId || (!host && credentials.length) ? 'saved' : host?.authType ?? 'key-file')
   const [credentialId, setCredentialId] = useState(host?.credentialId || defaultCredentialId || credentials[0]?.id || '')
@@ -38,7 +38,7 @@ export function HostEditor({ ctx, host, folders, credentials = [], defaultCreden
   return <Modal title={host ? '编辑远程主机' : '添加远程主机'} onClose={onClose}><form onSubmit={(e) => {
     e.preventDefault(); setBusy(true); setError('')
     void rpc(ctx, 'host/save', { host: { ...host, ...form, credentialId: authChoice === 'saved' ? credentialId : undefined, folderId: form.folderId || undefined, port: Number(form.port), kind: 'ssh' }, secret: authChoice === 'saved' ? '' : secret, passphrase: authChoice === 'saved' ? '' : phrase, clearPassphrase: clearPhrase, revision })
-      .then(() => { setSecret(''); setPhrase(''); onSaved(); onClose() }).catch((e) => setError(e.message)).finally(() => setBusy(false))
+      .then(() => { setSecret(''); setPhrase(''); onSaved(form.folderId); onClose() }).catch((e) => setError(e.message)).finally(() => setBusy(false))
   }}>
     <Field title="名称"><input required value={form.label} onChange={(e) => patch('label', e.target.value)} /></Field>
     <div className="zt-form-row"><Field title="主机地址"><input required value={form.host} placeholder="主机名或 IP" onChange={(e) => patch('host', e.target.value)} /></Field>
@@ -75,11 +75,11 @@ export function JumpEditor({ ctx, profile, revision, onClose, onSaved }: { ctx: 
     <footer><button type="button" onClick={onClose}>取消</button><button className="zt-primary" disabled={busy}>{busy ? '保存中…' : '保存实例'}</button></footer>
   </form></Modal>
 }
-export function FolderEditor({ ctx, folder, folders, revision, onClose, onSaved }: { ctx: ClientContext; folder?: HostFolder; folders: HostFolder[]; revision?: number; onClose: () => void; onSaved: () => void }) {
-  const [name, setName] = useState(folder?.label ?? ''), [parentId, setParentId] = useState(folder?.parentId ?? ''), [error, setError] = useState(''), [busy, setBusy] = useState(false)
+export function FolderEditor({ ctx, folder, defaultParentId = '', folders, revision, onClose, onSaved }: { ctx: ClientContext; folder?: HostFolder; defaultParentId?: string; folders: HostFolder[]; revision?: number; onClose: () => void; onSaved: (parentId?: string) => void }) {
+  const [name, setName] = useState(folder?.label ?? ''), [parentId, setParentId] = useState(folder ? folder.parentId ?? '' : defaultParentId), [error, setError] = useState(''), [busy, setBusy] = useState(false)
   const excluded = new Set<string>(); if (folder) { excluded.add(folder.id); for (const row of folderRows(folders)) if (row.parentId && excluded.has(row.parentId)) excluded.add(row.id) }
   return <Modal title={folder ? '编辑主机文件夹' : '新建主机文件夹'} onClose={onClose}><form onSubmit={(e) => { e.preventDefault(); setBusy(true); void rpc(ctx, 'folder/save', { folder: { id: folder?.id, label: name, parentId: parentId || undefined }, revision })
-    .then(() => { onSaved(); onClose() }).catch((e) => setError(e.message)).finally(() => setBusy(false)) }}>
+    .then(() => { onSaved(parentId); onClose() }).catch((e) => setError(e.message)).finally(() => setBusy(false)) }}>
     <Field title="名称"><input required value={name} onChange={(e) => setName(e.target.value)} /></Field>
     <Field title="父文件夹"><select value={parentId} onChange={(e) => setParentId(e.target.value)}><option value="">根目录</option>{folderRows(folders).filter((f) => !excluded.has(f.id)).map((f) => <option value={f.id} key={f.id}>{'　'.repeat(Math.min(8, f.depth))}{f.label}</option>)}</select></Field>
     {error && <p className="zt-error" role="alert">{error}</p>}<footer><button type="button" onClick={onClose}>取消</button><button disabled={busy} className="zt-primary">{busy ? '保存中…' : folder ? '保存' : '创建'}</button></footer>

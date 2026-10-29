@@ -189,6 +189,11 @@ describe('DSH 宿主接口', () => {
     fixture.ctx.credentials.describe = async () => { reads++; return { configured: true } }
     const result = await fixture.call('catalog', { offset: 19800 })
     expect(result.value.hosts).toHaveLength(200); expect(result.value.total).toBe(20000); expect(reads).toBe(200)
+    // 本地展示快照不含认证配置；编辑时按稳定 ID 精确获取完整配置。
+    reads = 0
+    const editing = await fixture.call('catalog', { targetId: 'h-19999' })
+    expect(editing.value.total).toBe(1); expect(editing.value.hosts).toEqual([hosts[19999]]); expect(reads).toBe(1)
+    expect((await fixture.call('catalog', { targetId: 'removed-host' })).value.hosts).toEqual([])
     fixture.dispose()
   })
   it('精确认证路由拒绝错误媒体类型和伪造的方法信封', async () => {

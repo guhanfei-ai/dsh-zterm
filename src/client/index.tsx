@@ -15,7 +15,7 @@ function SidebarWorkbench({ ctx, service, tab, scope, visible }: any) {
   useEffect(() => {
     if (tab?.id && tab.title !== PRODUCT_NAME) service.updateTab?.(tab.id, { title: PRODUCT_NAME })
   }, [service, tab?.id, tab?.title])
-  return <Workbench ctx={ctx} sessionId={scope.sessionId} visible={visible} />
+  return <Workbench key={scope.sessionId} ctx={ctx} sessionId={scope.sessionId} visible={visible} />
 }
 export function apply(ctx: ClientContext) {
   const listeners = new Set<() => void>(); let sidebar: any
@@ -96,5 +96,5 @@ function Standalone({ ctx, sessionId, onClose, onConflict }: { ctx: ClientContex
     const start = event.clientX, initial = width
     startDrag(event, (e) => { const value = bounds(initial + start - e.clientX); setWidth(value); saveNumber('dsh-zterm.panel-width', value) })
   }
-  return <section className="zt-standalone" style={{ width }} aria-label={PRODUCT_NAME}><div className="zt-panel-handle" role="separator" aria-label={`调整 ${PRODUCT_NAME} 面板宽度`} onMouseDown={resize} /><Workbench ctx={ctx} sessionId={sessionId} onClose={onClose} /></section>
+  return <section className="zt-standalone" style={{ width }} aria-label={PRODUCT_NAME}><div className="zt-panel-handle" role="separator" aria-label={`调整 ${PRODUCT_NAME} 面板宽度`} onMouseDown={resize} /><Workbench key={sessionId} ctx={ctx} sessionId={sessionId} onClose={onClose} /></section>
 }
