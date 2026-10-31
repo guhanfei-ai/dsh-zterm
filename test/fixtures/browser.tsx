@@ -12,8 +12,14 @@ const largeTree = new URLSearchParams(location.search).get('tree') === 'large'
 const treeMode = new URLSearchParams(location.search).get('tree'), treeRequests: any[] = [], treeDelays = new Map<string, number>(), treeFailures = new Set<string>()
 let jumpChildrenRemoved = false
 let tab: any, open = false, activeType = 'zterm'
-let openedTab: any, titleUpdates = 0
+let openedTab: any, titleUpdates = 0, openCalls = 0, headerKey = 0, sessionId = 'fixture-session'
+const history = new URLSearchParams(location.search).get('history') === '1'
+const legacyHook = new URLSearchParams(location.search).get('hook') === 'session'
+let chatSnapshot = { legacy: { nodes: history ? [{ children: [{ id: 'historical-connect', name: 'zterm_connect' }, { calls: [{ id: 'historical-bind', name: 'zterm_bind' }] }] }] as any[] : [] as any[] } }
 const notify = () => listeners.forEach((listener) => listener())
+function useChatSnapshot(selector: (snapshot: any) => any) {
+  return selector(React.useSyncExternalStore((listener) => { listeners.add(listener); return () => listeners.delete(listener) }, () => chatSnapshot))
+}
 let revision = 1, seq = 1, terminalSequence = 1, output = '$ uname -a\r\nLinux test-machine 6.8.0 x86_64 GNU/Linux\r\n$ '
 const target = { source: 'ssh', assetId: 'app-01', label: '应用服务 01', host: '192.0.2.21', port: 22, username: 'operator' }
 const state: any = { terminals: [{ id: 'terminal-01', generation: 1, target, state: connecting ? 'connecting' : 'ready', busy: false, uncertain: false, agentReady: !connecting, createdAt: new Date().toISOString() }], binding: undefined, operations: [], revision: 1, capabilities: { local: localEnabled, external: false }, hostPlatform: 'linux' }
@@ -49,6 +55,10 @@ const jumpQuery = (payload: any) => {
 Object.assign(w.__ztermFixture, { treeRequests, delay: (key: string, ms: number) => treeDelays.set(key, ms), failNext: (key: string) => treeFailures.add(key),
   removeJumpChildren: () => { jumpChildrenRemoved = true },
   closeWorkbench: () => { open = false; notify() },
+  uiSnapshot: () => ({ sessionId, open, openCalls, calls: Object.fromEntries(calls) }),
+  setChatNodes: (nodes: any[]) => { chatSnapshot = { legacy: { nodes } }; notify() },
+  switchSession: (id: string, nodes: any[] = []) => { sessionId = id; open = false; chatSnapshot = { legacy: { nodes } }; notify() },
+  remountHeader: () => { headerKey++; notify() },
   renameHost: (id: string, label: string) => { catalog.hosts.find((host: any) => host.id === id).label = label; revision++ },
   renameAsset: (id: string, name: string) => { allJumpAssets.find((asset) => asset.assetId === id).name = name },
   catalog: () => ({ folders: catalog.folders, hosts: catalog.hosts.map((host: any) => ({ id: host.id, label: host.label, folderId: host.folderId })), revision }),
@@ -56,7 +66,7 @@ Object.assign(w.__ztermFixture, { treeRequests, delay: (key: string, ms: number)
 })
 catalog.temporarilyDisabled = new URLSearchParams(location.search).get('disabled') === '1'
 const ctx: any = { effect: (body: any) => body(), inject: (names: string[], body: any) => { if (!names.includes('betterSidebar') || withSidebar) return body(ctx) }, slots: { inject: (_name: any, body: any) => body(), register: (descriptor: any, component: any) => { slots.set(descriptor.name, component); return () => {} } },
-  betterSidebar: withSidebar ? { registerTab: (descriptor: any) => { tab = descriptor; return () => {} }, openTab: (seed: any) => { openedTab ??= { id: 'fixture-tab', title: legacyTab ? '终端工作台' : seed.title }; open = true; activeType = 'zterm'; notify() },
+  betterSidebar: withSidebar ? { registerTab: (descriptor: any) => { tab = descriptor; return () => {} }, openTab: (seed: any) => { openCalls++; openedTab ??= { id: 'fixture-tab', title: legacyTab ? '终端工作台' : seed.title }; open = true; activeType = 'zterm'; notify() },
     updateTab: (id: string, patch: any) => { if (openedTab?.id === id) { openedTab = { ...openedTab, ...patch }; titleUpdates++; notify() } } } : undefined,
   connection: { rpc: { call: async (_channel: string, endpoint: string, payload: any) => {
     let value: any = {}; const method = endpoint.slice(6)
@@ -106,11 +116,11 @@ const ctx: any = { effect: (body: any) => body(), inject: (names: string[], body
 w.__ModuleLoader__ = { load: (bundle: any) => { const plugin = bundle.factory((name: string) => name === 'react' ? React : name === 'react/jsx-runtime' ? jsx : {}); plugin.apply(ctx); render() } }
 const root = createRoot(document.getElementById('fixture')!)
 function App() {
-  React.useSyncExternalStore((listener) => { listeners.add(listener); return () => listeners.delete(listener) }, () => `${open}:${activeType}:${resizes.length}:${openedTab?.title}:${titleUpdates}`)
+  React.useSyncExternalStore((listener) => { listeners.add(listener); return () => listeners.delete(listener) }, () => `${open}:${activeType}:${resizes.length}:${openedTab?.title}:${titleUpdates}:${sessionId}:${headerKey}`)
   const [settingsOpen, setSettingsOpen] = React.useState(false), Header = slots.get('conversation.session.header.actions'), Settings = slots.get('settings.section'), NativeTitle = slots.get('sidebar.right.pane.tab.title')
-  return <div className="fixture-app"><div id="root" className="fixture-chat"><header><strong>DSH 对话</strong>{Header && <Header sessionId="fixture-session" />}<button onClick={() => setSettingsOpen(true)}>设置</button></header><section><div className="fixture-user">帮忙检查应用服务的机器状态。</div><div className="fixture-ai">已找到对应资产。可以在右侧 zTerm 查看连接和操作过程。<p>当前模式：默认只读。需要修改时，由人类在终端工具栏开启读写。</p></div></section><footer><textarea placeholder="继续与 AI 对话…" /><span>同一对话中的资产、证据和操作结果</span><output data-testid="fixture-diagnostics">{JSON.stringify({ resizes: resizes.slice(-8), calls: Object.fromEntries(calls), titleUpdates, tabTitle: openedTab?.title })}</output></footer></div>
-    {open && <aside className="fixture-side"><nav><button onClick={() => { activeType = 'mindmap'; notify() }}>思维脑图</button><button onClick={() => { activeType = 'zterm'; notify() }}>{NativeTitle ? <NativeTitle /> : openedTab?.title ?? 'zTerm'}</button></nav>
-      <div className="fixture-content" style={{ display: activeType === 'zterm' ? 'block' : 'none' }}>{tab && <tab.component ctx={ctx} tab={openedTab} scope={{ sessionId: 'fixture-session' }} visible={activeType === 'zterm'} />}</div>
+  return <div className="fixture-app"><div id="root" className="fixture-chat"><header><strong>DSH 对话</strong>{Header && <Header key={headerKey} sessionId={sessionId} {...(legacyHook ? { useSession: useChatSnapshot } : { useChat: useChatSnapshot })} />}<button onClick={() => setSettingsOpen(true)}>设置</button></header><section><div className="fixture-user">帮忙检查应用服务的机器状态。</div><div className="fixture-ai">已找到对应资产。可以在右侧 zTerm 查看连接和操作过程。<p>当前模式：默认只读。需要修改时，由人类在终端工具栏开启读写。</p></div></section><footer><textarea placeholder="继续与 AI 对话…" /><span>同一对话中的资产、证据和操作结果</span><output data-testid="fixture-diagnostics">{JSON.stringify({ resizes: resizes.slice(-8), calls: Object.fromEntries(calls), titleUpdates, tabTitle: openedTab?.title })}</output></footer></div>
+    {open && <aside className="fixture-side"><nav><button onClick={() => { activeType = 'mindmap'; notify() }}>思维脑图</button><button onClick={() => { activeType = 'zterm'; notify() }}>{NativeTitle ? <NativeTitle /> : openedTab?.title ?? 'zTerm'}</button><button aria-label="关闭 zTerm 面板" onClick={() => { open = false; notify() }}>×</button></nav>
+      <div className="fixture-content" style={{ display: activeType === 'zterm' ? 'block' : 'none' }}>{tab && <tab.component ctx={ctx} tab={openedTab} scope={{ sessionId }} visible={activeType === 'zterm'} />}</div>
       {activeType === 'mindmap' && <div className="fixture-mindmap">脑图与终端共享右侧面板，通过 Tab 切换。</div>}</aside>}
     {settingsOpen && <div role="dialog" aria-label="zTerm 设置" style={{ position: 'absolute', left: '5%', top: '8%', width: 'min(600px,90%)', height: '84%', zIndex: 70, background: '#fff', border: '1px solid #dfe3e9' }}><button aria-label="关闭设置" style={{ position: 'absolute', right: 5, top: 5, zIndex: 1 }} onClick={() => setSettingsOpen(false)}>×</button>{Settings && <Settings />}</div>}
   </div>

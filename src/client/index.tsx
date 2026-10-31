@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useSyncExternalStore } from 'react'
+import React, { useState, useEffect, useSyncExternalStore } from 'react'
 import { Workbench, pageId } from './workbench'
 import { SettingsPanel } from './settings'
 import { rpc } from './api'
@@ -34,16 +34,18 @@ export function apply(ctx: ClientContext) {
     return () => { disposeTitle?.(); dispose?.(); sidebar = undefined; notify() }
   })
   function Header(props: any) {
-    const service = useSidebar(), [open, setOpen] = useState(false), [message, setMessage] = useState(''), [disabled, setDisabled] = useState(false)
+    const service = useSidebar(), [openSessionId, setOpenSessionId] = useState<string>(), [message, setMessage] = useState(''), [disabled, setDisabled] = useState(false)
     const sessionId = props.sessionId ?? props.scope?.sessionId, scope = props.scope ?? { sessionId }
-    const nodesHook = props.useChat ?? props.useSession
-    const nodes = typeof nodesHook === 'function' ? nodesHook((snapshot: any) => snapshot.legacy?.nodes ?? snapshot.nodes) : undefined
-    const seen = useRef('')
+    // 展开只来自人类点击，不订阅聊天记录，避免历史或新工具调用抢占界面。
     const show = () => {
+      if (!sessionId) return
+      setMessage('')
       if (service?.openTab) service.openTab({ type: TAB_ID, title: PRODUCT_NAME, url: 'zterm://workbench' }, scope)
       else if (parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--dsh-mindmap-width')) > 0) setMessage('右侧脑图面板已展开。请先收起脑图，或使用 Better Sidebar 的 Tab 切换。')
-      else setOpen(true)
+      else setOpenSessionId(sessionId)
     }
+    // 独立面板的展开仅属于当前聊天；切换后回来也需再次点击。
+    useEffect(() => { setOpenSessionId(undefined); setMessage('') }, [sessionId])
     useEffect(() => { if (sessionId) void rpc(ctx, 'client/attach', { sessionId, pageId }).catch(() => {}) }, [sessionId])
     useEffect(() => {
       let alive = true
@@ -52,22 +54,8 @@ export function apply(ctx: ClientContext) {
       window.addEventListener('dsh-zterm:state', refresh)
       return () => { alive = false; window.removeEventListener('dsh-zterm:state', refresh) }
     }, [ctx])
-    useEffect(() => {
-      if (!nodes) return
-      const stack = Array.isArray(nodes) ? [...nodes] : [nodes]; let last = ''
-      for (let count = 0; stack.length && count < 5000; count++) { const node: any = stack.pop(); if (!node || typeof node !== 'object') continue
-        const name = node.name ?? node.call?.name ?? node.toolName
-        if (['zterm_connect', 'zterm_bind'].includes(name)) { last = String(node.id ?? node.callId ?? node.call?.id ?? name); break }
-        for (const key of ['children', 'nodes', 'body', 'calls', 'subCalls']) {
-          const children = node[key]
-          // 不能用 spread：超大子节点数组会抛 RangeError，逐个限幅入栈。
-          if (Array.isArray(children)) for (const child of children) { if (stack.length >= 5000) break; stack.push(child) }
-        }
-      }
-      if (last && last !== seen.current) { seen.current = last; show() }
-    }, [nodes, service, sessionId])
     return <><button className="zt-header-button" title={disabled ? `${PRODUCT_NAME} 已临时禁用：AI 不会使用本插件工具` : `打开 ${PRODUCT_NAME}`} onClick={show}>{icon(15)}{PRODUCT_NAME}{disabled && <span className="zt-header-badge">AI禁用</span>}</button>
-      {open && !service && sessionId && <Standalone ctx={ctx} sessionId={sessionId} onClose={() => setOpen(false)} onConflict={() => { setOpen(false); setMessage(`脑图面板已展开，${PRODUCT_NAME} 独立面板已收起。可以从 ${PRODUCT_NAME} 入口重新打开。`) }} />}
+      {openSessionId === sessionId && !service && sessionId && <Standalone ctx={ctx} sessionId={sessionId} onClose={() => setOpenSessionId(undefined)} onConflict={() => { setOpenSessionId(undefined); setMessage(`脑图面板已展开，${PRODUCT_NAME} 独立面板已收起。可以从 ${PRODUCT_NAME} 入口重新打开。`) }} />}
       {message && <div className="zt-standalone-error" role="alert">{message}<button onClick={() => setMessage('')}>关闭</button></div>}</>
   }
   ctx.slots.inject('conversation.session.header.actions', () => ctx.slots.register({ name: 'conversation.session.header.actions', id: 'dsh-zterm', order: 109 }, Header))
