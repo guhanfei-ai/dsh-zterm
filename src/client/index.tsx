@@ -1,10 +1,11 @@
-import React, { useState, useEffect, useSyncExternalStore } from 'react'
+import React, { useState, useEffect, useRef, useSyncExternalStore } from 'react'
 import { Workbench, pageId } from './workbench'
 import { SettingsPanel } from './settings'
 import { rpc } from './api'
 import { savedNumber, saveNumber, useDrag } from './preferences'
 import css from './style.css'
 import xtermCss from '@xterm/xterm/css/xterm.css'
+import { MINDMAP_PANEL_ID, ZTERM_PANEL_ID, ZTERM_WIDTH_VARIABLE, installPanel, listenPeerPanelOpen, type PanelLayoutHandle } from './panel-layout'
 import type { ClientContext } from '../shared/types'
 import { PRODUCT_NAME } from '../shared/branding'
 
@@ -69,17 +70,14 @@ function Standalone({ ctx, sessionId, onClose, onConflict }: { ctx: ClientContex
     void rpc(ctx, 'catalog').then((catalog) => { if (alive) setWidth(bounds(savedNumber('dsh-zterm.panel-width', window.innerWidth * catalog.defaultPanelWidth / 100, 0, window.innerWidth))) }).catch(() => {})
     return () => { alive = false }
   }, [ctx])
-  useEffect(() => {
-    const check = () => { if (parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--dsh-mindmap-width')) > 0) onConflict() }
-    const observer = new MutationObserver(check); observer.observe(document.documentElement, { attributes: true, attributeFilter: ['style'] }); check()
-    return () => observer.disconnect()
-  }, [onConflict])
   useEffect(() => { const handler = () => setWidth((value) => Math.min(window.innerWidth * .8, Math.max(Math.min(480, window.innerWidth * .8), value))); window.addEventListener('resize', handler); return () => window.removeEventListener('resize', handler) }, [])
-  useEffect(() => {
-    document.documentElement.style.setProperty('--dsh-zterm-width', `${width}px`)
-    const style = document.createElement('style'); style.dataset.plugin = 'dsh-zterm'; style.textContent = '#root{margin-right:calc(var(--dsh-zterm-width,0px) + var(--dsh-sidebar-width,0px))!important;width:calc(100% - var(--dsh-zterm-width,0px) - var(--dsh-sidebar-width,0px))!important}'
-    document.head.appendChild(style); return () => { style.remove(); document.documentElement.style.removeProperty('--dsh-zterm-width') }
-  }, [width])
+  // 共享契约 v1（issue #6）：以 dsh:panel-layout 布局事件替代 MutationObserver + getComputedStyle 轮询；
+  // 脑图展开（width>0）时收起自己；cleanup 移除监听。入口点击时的一次性 CSS 变量读取仍由 Header 兜底。
+  useEffect(() => listenPeerPanelOpen(MINDMAP_PANEL_ID, onConflict), [onConflict])
+  // L1/L5：挂载期间持有唯一的 #root 布局样式；宽度变化（打开/拖宽）同步变量并派发事件，卸载时清理并派发 width=0。
+  const panel = useRef<PanelLayoutHandle>()
+  useEffect(() => { panel.current = installPanel(ZTERM_PANEL_ID, ZTERM_WIDTH_VARIABLE); return () => { panel.current?.dispose(); panel.current = undefined } }, [])
+  useEffect(() => { panel.current?.setWidth(width) }, [width])
   const resize = (event: React.MouseEvent) => {
     const start = event.clientX, initial = width
     startDrag(event, (e) => { const value = bounds(initial + start - e.clientX); setWidth(value); saveNumber('dsh-zterm.panel-width', value) })

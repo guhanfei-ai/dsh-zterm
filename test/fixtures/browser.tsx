@@ -21,9 +21,17 @@ function useChatSnapshot(selector: (snapshot: any) => any) {
   return selector(React.useSyncExternalStore((listener) => { listeners.add(listener); return () => listeners.delete(listener) }, () => chatSnapshot))
 }
 let revision = 1, seq = 1, terminalSequence = 1, output = '$ uname -a\r\nLinux test-machine 6.8.0 x86_64 GNU/Linux\r\n$ '
+// 共享契约 v1（issue #6）：记录 dsh:panel-layout 布局事件；脑图替身按契约写变量并派发事件。
+const layoutEvents: any[] = []
+window.addEventListener('dsh:panel-layout', (event) => layoutEvents.push({ ...(event as CustomEvent).detail }))
+const setMindmapWidth = (width: number) => {
+  if (width > 0) document.documentElement.style.setProperty('--dsh-mindmap-width', `${width}px`)
+  else document.documentElement.style.removeProperty('--dsh-mindmap-width')
+  window.dispatchEvent(new CustomEvent('dsh:panel-layout', { detail: { id: 'dsh-mindmap', width } }))
+}
 const target = { source: 'ssh', assetId: 'app-01', label: '应用服务 01', host: '192.0.2.21', port: 22, username: 'operator' }
 const state: any = { terminals: [{ id: 'terminal-01', generation: 1, target, state: connecting ? 'connecting' : 'ready', busy: false, uncertain: false, agentReady: !connecting, createdAt: new Date().toISOString() }], binding: undefined, operations: [], revision: 1, capabilities: { local: localEnabled, external: false }, hostPlatform: 'linux' }
-w.__ztermFixture = { resizes, snapshot: () => ({ terminals: state.terminals.map((t: any) => ({ id: t.id, source: t.target.source })), binding: state.binding }), setOutput: (text: string) => { output = text; seq++ }, finishConnect: () => { state.terminals[0].state = 'ready'; state.terminals[0].agentReady = true } }
+w.__ztermFixture = { resizes, layoutEvents, openMindmap: (width = 360) => setMindmapWidth(width), closeMindmap: () => setMindmapWidth(0), snapshot: () => ({ terminals: state.terminals.map((t: any) => ({ id: t.id, source: t.target.source })), binding: state.binding }), setOutput: (text: string) => { output = text; seq++ }, finishConnect: () => { state.terminals[0].state = 'ready'; state.terminals[0].agentReady = true } }
 const catalog: any = { hosts: Array.from({ length: 8 }, (_, i) => ({ id: `host-${i}`, label: i < 3 ? `应用服务 0${i + 1}` : i < 5 ? `数据库 0${i - 2}` : `缓存节点 0${i - 4}`, kind: 'ssh', host: `192.0.2.${21 + i}`, port: 22, username: 'operator', authType: 'password', credentialRef: `DSH_ZTERM_TEST_${i}`, folderId: i < 3 ? 'apps' : undefined })), folders: [{ id: 'apps', label: '应用服务' }], jumpservers: [{ id: 'jump-1', label: '测试堡垒机', baseUrl: 'https://jump.example.invalid', authMode: 'token', credentialRef: 'DSH_ZTERM_TEST_JUMP', verifyTls: true }], total: 8, revision: 1,
   credentials: [], defaultCredentialId: '', allowLocalTerminal: localEnabled, allowExternalTargets: false, temporarilyDisabled: false, defaultPanelWidth: 60, maxSessions: 12, maxWriteCalls: 100, commandTimeoutMs: 30000, credentialsConfigured: {} }
 if (largeTree) catalog.folders.push(...Array.from({ length: 30 }, (_, i) => ({ id: `folder-${i}`, label: `测试文件夹 ${i + 1}` })))
