@@ -1,5 +1,6 @@
 import React from 'react'
 import * as jsx from 'react/jsx-runtime'
+import * as reactDom from 'react-dom'
 import { createRoot } from 'react-dom/client'
 
 // 仅用于离线 UI 验证：加载正式客户端产物，宿主接口使用虚构数据。
@@ -121,7 +122,7 @@ const ctx: any = { effect: (body: any) => body(), inject: (names: string[], body
     else if (method === 'jump/query') value = jumpQuery(payload)
     return { ok: true, value: structuredClone(value) }
   } } } }
-w.__ModuleLoader__ = { load: (bundle: any) => { const plugin = bundle.factory((name: string) => name === 'react' ? React : name === 'react/jsx-runtime' ? jsx : {}); plugin.apply(ctx); render() } }
+w.__ModuleLoader__ = { load: (bundle: any) => { const plugin = bundle.factory((name: string) => name === 'react' ? React : name === 'react/jsx-runtime' ? jsx : name === 'react-dom' ? reactDom : {}); plugin.apply(ctx); render() } }
 const root = createRoot(document.getElementById('fixture')!)
 function App() {
   React.useSyncExternalStore((listener) => { listeners.add(listener); return () => listeners.delete(listener) }, () => `${open}:${activeType}:${resizes.length}:${openedTab?.title}:${titleUpdates}:${sessionId}:${headerKey}`)

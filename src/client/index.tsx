@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useSyncExternalStore } from 'react'
+import { createPortal } from 'react-dom'
 import { Workbench, pageId } from './workbench'
 import { SettingsPanel } from './settings'
 import { rpc } from './api'
@@ -62,7 +63,7 @@ export function apply(ctx: ClientContext) {
   ctx.slots.inject('conversation.session.header.actions', () => ctx.slots.register({ name: 'conversation.session.header.actions', id: 'dsh-zterm', order: 109 }, Header))
   ctx.slots.inject('settings.section', () => ctx.slots.register({ name: 'settings.section', id: 'dsh-zterm', order: 109, label: PRODUCT_NAME, icon }, () => <SettingsPanel ctx={ctx} />))
 }
-function Standalone({ ctx, sessionId, onClose, onConflict }: { ctx: ClientContext; sessionId: string; onClose: () => void; onConflict: () => void }) {
+export function Standalone({ ctx, sessionId, onClose, onConflict }: { ctx: ClientContext; sessionId: string; onClose: () => void; onConflict: () => void }) {
   const bounds = (value: number) => Math.min(window.innerWidth * .8, Math.max(Math.min(480, window.innerWidth * .8), value))
   const [width, setWidth] = useState(() => bounds(savedNumber('dsh-zterm.panel-width', window.innerWidth * .6, 0, window.innerWidth))), startDrag = useDrag()
   useEffect(() => {
@@ -82,5 +83,10 @@ function Standalone({ ctx, sessionId, onClose, onConflict }: { ctx: ClientContex
     const start = event.clientX, initial = width
     startDrag(event, (e) => { const value = bounds(initial + start - e.clientX); setWidth(value); saveNumber('dsh-zterm.panel-width', value) })
   }
-  return <section className="zt-standalone" style={{ width }} aria-label={PRODUCT_NAME}><div className="zt-panel-handle" role="separator" aria-label={`调整 ${PRODUCT_NAME} 面板宽度`} onMouseDown={resize} /><Workbench key={sessionId} ctx={ctx} sessionId={sessionId} onClose={onClose} /></section>
+  // issue #4（对齐 guhanfei-ai/dsh-mindmap#5 的 0.18.8 修复）：宿主壳 0.2.2-rc 线的会话头部祖先链
+  // 带 overflow: clip/hidden，独立面板随头部槽位渲染时整块被裁剪不绘制（fixed/absolute 逃不出祖先裁剪）。
+  // 面板宿主层 portal 到 document.body；zt-standalone-error 提示条保持头部槽位原位。关闭即卸载组件，
+  // portal 随卸载移除，不残留 body 子节点。无 DOM 环境（SSR/测试）退回原位渲染，不抛错。
+  const host = <section className="zt-standalone" style={{ width }} aria-label={PRODUCT_NAME}><div className="zt-panel-handle" role="separator" aria-label={`调整 ${PRODUCT_NAME} 面板宽度`} onMouseDown={resize} /><Workbench key={sessionId} ctx={ctx} sessionId={sessionId} onClose={onClose} /></section>
+  return typeof document === 'undefined' ? host : createPortal(host, document.body)
 }
